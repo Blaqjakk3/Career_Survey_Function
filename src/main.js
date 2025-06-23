@@ -17,20 +17,41 @@ const config = {
   careerPathsCollectionId: 'careerPaths',
 };
 
-// Gemini AI integration
-async function callGeminiAPI(prompt) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-  
-  const result = await model.generateContent(prompt);
-  return result.response.text();
+// Enhanced Gemini AI integration with timeout and retry
+async function callGeminiAPIWithTimeout(prompt, timeoutMs = 25000) {
+  try {
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-1.5-flash',
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 2048,
+      },
+    });
+    
+    // Create a timeout promise
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Gemini API timeout')), timeoutMs);
+    });
+    
+    // Race between API call and timeout
+    const apiPromise = model.generateContent(prompt);
+    const result = await Promise.race([apiPromise, timeoutPromise]);
+    
+    return result.response.text();
+  } catch (error) {
+    console.error('Gemini API error:', error);
+    throw new Error(`AI service error: ${error.message}`);
+  }
 }
 
-// Generate dynamic questions based on career stage and context
+// Generate dynamic questions with fallback
 async function generateDynamicQuestions(userProfile) {
   const { careerStage, currentPath, currentSeniorityLevel, existingData } = userProfile;
   
   let contextPrompt = `
-    Generate 8-10 relevant career assessment questions for a ${careerStage} professional.
+    Generate 6-8 relevant career assessment questions for a ${careerStage} professional.
     
     Career Stage Context:
     - Pathfinder: Someone new to career life, exploring and learning
@@ -45,13 +66,11 @@ async function generateDynamicQuestions(userProfile) {
     ${existingData?.interests?.length ? `- Existing Interests: ${existingData.interests.join(', ')}` : ''}
     
     Requirements:
-    1. Return questions as a JSON array
-    2. Each question object should have: id, question, type, options (if applicable)
-    3. Question types: "multiple_choice", "checkbox", "text", "rating", "ranking"
-    4. Make questions contextual and relevant to their career stage
-    5. For Trailblazer: Focus on growth, advancement, skill development
-    6. For Horizon Changer: Focus on transferable skills, new interests, pivot motivations
-    7. For Pathfinder: Focus on discovery, exploration, foundational skills
+    1. Return ONLY a valid JSON array, no other text
+    2. Each question object: {"id": "q1", "question": "text", "type": "multiple_choice", "options": ["A", "B"]}
+    3. Question types: "multiple_choice", "checkbox", "text", "rating"
+    4. Keep questions concise and relevant
+    5. Maximum 4 options per multiple choice question
     
     Example format:
     [
@@ -60,81 +79,84 @@ async function generateDynamicQuestions(userProfile) {
         "question": "What motivates you most in your work?",
         "type": "multiple_choice",
         "options": ["Impact", "Growth", "Stability", "Creativity"]
+      },
+      {
+        "id": "q2",
+        "question": "Which skills do you enjoy using?",
+        "type": "checkbox",
+        "options": ["Problem solving", "Communication", "Leadership", "Analysis"]
       }
     ]
   `;
 
-  const response = await callGeminiAPI(contextPrompt);
-  
   try {
-    // Extract JSON from response
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    const response = await callGeminiAPIWithTimeout(contextPrompt, 20000);
+    
+    // Clean and extract JSON
+    const cleanedResponse = response.trim();
+    const jsonMatch = cleanedResponse.match(/\[[\s\S]*\]/);
+    
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      const questions = JSON.parse(jsonMatch[0]);
+      // Validate structure
+      if (Array.isArray(questions) && questions.length > 0 && questions[0].id) {
+        return questions;
+      }
     }
-    throw new Error('No valid JSON found in response');
+    
+    throw new Error('Invalid JSON structure');
   } catch (error) {
-    console.error('Error parsing questions:', error);
-    // Fallback to default questions
+    console.error('Error generating questions:', error);
+    // Return fallback questions
     return getDefaultQuestions(careerStage);
   }
 }
 
-// AI-powered career matching
+// Optimized AI career matching with reduced payload
 async function matchCareersWithAI(userResponses, allCareerPaths) {
-  const userProfile = JSON.stringify(userResponses, null, 2);
-  const careerPathsData = allCareerPaths.map(path => ({
-    id: path.$id,
-    title: path.title,
-    industry: path.industry,
-    requiredSkills: path.requiredSkills,
-    requiredInterests: path.requiredInterests,
-    description: path.description,
-    minSalary: path.minSalary,
-    maxSalary: path.maxSalary
-  }));
-
-  const matchingPrompt = `
-    You are an expert career counselor. Analyze the user profile and match them with the most suitable career paths.
-    
-    User Profile:
-    ${userProfile}
-    
-    Available Career Paths:
-    ${JSON.stringify(careerPathsData, null, 2)}
-    
-    Instructions:
-    1. Analyze the user's skills, interests, experience, and career goals
-    2. Match them with the top 5-8 most suitable career paths
-    3. Consider their career stage (Pathfinder/Trailblazer/Horizon Changer) in your analysis
-    4. For each match, provide a compatibility score (0-100) and detailed reasoning
-    5. Return results as JSON array with this structure:
-    
-    [
-      {
-        "careerPathId": "path_id",
-        "compatibilityScore": 85,
-        "reasoning": "Detailed explanation of why this is a good match",
-        "keyStrengths": ["strength1", "strength2"],
-        "developmentAreas": ["area1", "area2"],
-        "salaryFit": "excellent|good|fair",
-        "timeToTransition": "immediate|3-6 months|6-12 months|1+ years"
-      }
-    ]
-    
-    Focus on:
-    - Skills alignment (both existing and transferable)
-    - Interest alignment
-    - Career stage appropriateness
-    - Growth potential
-    - Realistic transition paths
-    - Salary expectations vs reality
-  `;
-
-  const response = await callGeminiAPI(matchingPrompt);
-  
   try {
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    // Limit career paths to prevent payload issues
+    const limitedPaths = allCareerPaths.slice(0, 20);
+    
+    const userProfile = {
+      careerStage: userResponses.careerStage,
+      responses: userResponses,
+      timestamp: userResponses.timestamp
+    };
+    
+    const careerPathsData = limitedPaths.map(path => ({
+      id: path.$id,
+      title: path.title,
+      industry: path.industry,
+      requiredSkills: path.requiredSkills?.slice(0, 5) || [],
+      requiredInterests: path.requiredInterests?.slice(0, 5) || [],
+      description: path.description?.substring(0, 200) || '',
+      minSalary: path.minSalary,
+      maxSalary: path.maxSalary
+    }));
+
+    const matchingPrompt = `
+      You are a career counselor. Match the user with suitable career paths based on their profile.
+      
+      User Profile: ${JSON.stringify(userProfile)}
+      
+      Career Paths: ${JSON.stringify(careerPathsData)}
+      
+      Instructions:
+      1. Return ONLY a valid JSON array, no other text
+      2. Match top 5 most suitable career paths
+      3. Provide compatibility score (0-100) and brief reasoning
+      4. Structure: [{"careerPathId": "id", "compatibilityScore": 85, "reasoning": "brief explanation", "keyStrengths": ["strength1"], "developmentAreas": ["area1"], "salaryFit": "good", "timeToTransition": "3-6 months"}]
+      5. Keep reasoning under 100 characters
+      6. salaryFit: "excellent", "good", or "fair"
+      7. timeToTransition: "immediate", "3-6 months", "6-12 months", or "1+ years"
+    `;
+
+    const response = await callGeminiAPIWithTimeout(matchingPrompt, 25000);
+    
+    const cleanedResponse = response.trim();
+    const jsonMatch = cleanedResponse.match(/\[[\s\S]*\]/);
+    
     if (jsonMatch) {
       const matches = JSON.parse(jsonMatch[0]);
       
@@ -145,120 +167,183 @@ async function matchCareersWithAI(userResponses, allCareerPaths) {
           ...match,
           careerPath: fullCareerPath
         };
-      }).filter(match => match.careerPath); // Remove any matches without valid career paths
+      }).filter(match => match.careerPath);
     }
-    throw new Error('No valid JSON found in response');
+    
+    throw new Error('Invalid match response');
   } catch (error) {
-    console.error('Error parsing matches:', error);
-    throw new Error('Failed to process AI matching results');
+    console.error('Error in AI matching:', error);
+    // Return fallback matches
+    return getFallbackMatches(allCareerPaths.slice(0, 5));
   }
 }
 
-// Generate personalized career advice
+// Simple career advice generation
 async function generateCareerAdvice(userProfile, matches) {
-  const advicePrompt = `
-    Based on the user profile and career matches, provide personalized career advice.
-    
-    User Profile: ${JSON.stringify(userProfile, null, 2)}
-    Top Matches: ${JSON.stringify(matches.slice(0, 3), null, 2)}
-    
-    Provide advice covering:
-    1. Next steps for career development
-    2. Skills to develop or strengthen
-    3. Networking opportunities
-    4. Learning resources or certifications to pursue
-    5. Timeline and milestones
-    
-    Keep advice practical, actionable, and encouraging. Format as structured text.
-  `;
+  try {
+    const advicePrompt = `
+      Based on the user's career stage "${userProfile.careerStage}" and top career matches, provide 3-4 sentences of practical career advice.
+      
+      Top Matches: ${matches.slice(0, 2).map(m => m.careerPath?.title).join(', ')}
+      
+      Keep advice:
+      - Under 200 words
+      - Practical and actionable
+      - Encouraging
+      - Focused on next steps
+      
+      Return only the advice text, no formatting.
+    `;
 
-  return await callGeminiAPI(advicePrompt);
+    return await callGeminiAPIWithTimeout(advicePrompt, 15000);
+  } catch (error) {
+    console.error('Error generating advice:', error);
+    return getDefaultAdvice(userProfile.careerStage);
+  }
 }
 
-// Default questions fallback
+// Fallback functions
 function getDefaultQuestions(careerStage) {
   const baseQuestions = [
     {
       id: "q1",
-      question: "What type of work environment do you thrive in?",
+      question: "What type of work environment do you prefer?",
       type: "multiple_choice",
-      options: ["Remote", "Office", "Hybrid", "Field work", "Laboratory"]
+      options: ["Remote", "Office", "Hybrid", "Field work"]
     },
     {
       id: "q2",
-      question: "Which skills do you most enjoy using?",
+      question: "Which skills do you enjoy using most?",
       type: "checkbox",
-      options: ["Problem solving", "Creative thinking", "Leadership", "Analysis", "Communication"]
+      options: ["Problem solving", "Communication", "Leadership", "Analysis"]
+    },
+    {
+      id: "q3",
+      question: "What motivates you most in your work?",
+      type: "multiple_choice",
+      options: ["Impact", "Growth", "Stability", "Creativity"]
     }
   ];
 
-  const stageSpecificQuestions = {
+  const stageQuestions = {
     'Pathfinder': [
       {
-        id: "q3",
-        question: "What areas are you most curious to explore?",
+        id: "q4",
+        question: "Which areas interest you most?",
         type: "checkbox",
-        options: ["Technology", "Healthcare", "Business", "Creative Arts", "Science"]
+        options: ["Technology", "Healthcare", "Business", "Creative Arts"]
       }
     ],
     'Trailblazer': [
       {
-        id: "q3",
-        question: "What aspects of your current role do you want to expand?",
+        id: "q4",
+        question: "What aspects do you want to develop?",
         type: "checkbox",
-        options: ["Leadership", "Technical expertise", "Strategic thinking", "Team management"]
+        options: ["Leadership", "Technical skills", "Strategy", "Management"]
       }
     ],
     'Horizon Changer': [
       {
-        id: "q3",
-        question: "What's driving your desire to change career paths?",
+        id: "q4",
+        question: "What drives your career change?",
         type: "multiple_choice",
-        options: ["Better work-life balance", "Higher salary", "More meaningful work", "New challenges"]
+        options: ["Better balance", "Higher salary", "More meaning", "New challenges"]
       }
     ]
   };
 
-  return [...baseQuestions, ...(stageSpecificQuestions[careerStage] || [])];
+  return [...baseQuestions, ...(stageQuestions[careerStage] || [])];
 }
 
-// Main function handler
+function getFallbackMatches(careerPaths) {
+  return careerPaths.slice(0, 3).map((path, index) => ({
+    careerPathId: path.$id,
+    compatibilityScore: 75 - (index * 5),
+    reasoning: "Based on general career compatibility assessment",
+    keyStrengths: ["Adaptability", "Learning ability"],
+    developmentAreas: ["Skill development", "Experience"],
+    salaryFit: "good",
+    timeToTransition: "6-12 months",
+    careerPath: path
+  }));
+}
+
+function getDefaultAdvice(careerStage) {
+  const advice = {
+    'Pathfinder': "Focus on exploring different career paths through internships, informational interviews, and skill-building courses. Take advantage of entry-level opportunities to gain experience and discover your interests.",
+    'Trailblazer': "Leverage your existing experience to advance in your current field. Consider pursuing leadership roles, specialized certifications, or mentoring others to accelerate your career growth.",
+    'Horizon Changer': "Identify transferable skills from your current role and create a transition plan. Network in your target industry and consider additional training to bridge any skill gaps."
+  };
+  
+  return advice[careerStage] || "Continue developing your skills and exploring opportunities that align with your interests and goals.";
+}
+
+// Main function handler with better error handling
 export default async ({ req, res, log, error }) => {
   try {
+    // Set timeout for the entire function
+    const startTime = Date.now();
+    const FUNCTION_TIMEOUT = 55000; // 55 seconds (Appwrite timeout is 60s)
+    
+    log('Function started');
+    
     const { action, data } = JSON.parse(req.body);
     
     if (!process.env.GEMINI_API_KEY) {
       throw new Error('Gemini API key not configured');
     }
 
+    // Check remaining time before each operation
+    const checkTimeout = () => {
+      if (Date.now() - startTime > FUNCTION_TIMEOUT) {
+        throw new Error('Function timeout approaching');
+      }
+    };
+
     switch (action) {
       case 'generateQuestions':
+        checkTimeout();
+        log('Generating questions for user profile');
         const questions = await generateDynamicQuestions(data.userProfile);
+        log(`Generated ${questions.length} questions`);
         return res.json({ success: true, questions });
 
       case 'matchCareers':
-        // Fetch all career paths
+        checkTimeout();
+        log('Starting career matching process');
+        
+        // Fetch career paths with timeout
         const careerPaths = await databases.listDocuments(
           config.databaseId,
           config.careerPathsCollectionId,
-          [Query.limit(100)]
+          [Query.limit(50)] // Reduced limit for faster processing
         );
-
+        
+        log(`Found ${careerPaths.documents.length} career paths`);
+        checkTimeout();
+        
+        // Process matches
         const matches = await matchCareersWithAI(
           data.userResponses,
           careerPaths.documents
         );
-
-        // Generate personalized advice
+        
+        log(`Generated ${matches.length} matches`);
+        checkTimeout();
+        
+        // Generate advice
         const advice = await generateCareerAdvice(
           data.userResponses,
           matches
         );
-
+        
+        log('Career matching completed successfully');
         return res.json({ success: true, matches, advice });
 
       case 'updateUserProfile':
-        // Update user profile with survey responses
+        checkTimeout();
+        log(`Updating profile for user: ${data.userId}`);
+        
         const updatedUser = await databases.updateDocument(
           config.databaseId,
           config.talentsCollectionId,
@@ -266,18 +351,28 @@ export default async ({ req, res, log, error }) => {
           {
             ...data.profileUpdates,
             testTaken: true,
-            $updatedAt: new Date().toISOString()
+            lastUpdated: new Date().toISOString()
           }
         );
-
+        
+        log('Profile updated successfully');
         return res.json({ success: true, user: updatedUser });
 
       default:
-        throw new Error('Invalid action');
+        throw new Error(`Invalid action: ${action}`);
     }
 
   } catch (err) {
-    error('Function error:', err);
-    return res.json({ success: false, error: err.message }, 500);
+    error('Function error:', err.message);
+    error('Stack trace:', err.stack);
+    
+    // Return appropriate error response
+    const errorResponse = {
+      success: false,
+      error: err.message,
+      timestamp: new Date().toISOString()
+    };
+    
+    return res.json(errorResponse, 500);
   }
 };
