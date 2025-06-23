@@ -126,26 +126,28 @@ ANALYSIS REQUIREMENTS:
 
 3. Provide detailed matching with:
    - Match score (0-100)
-   - Specific reasoning for the match
-   - User's strengths for this path
-   - Areas needing development
-   - Actionable recommendations
+   - Specific reasoning for the match (SPEAK DIRECTLY TO THE USER using "you", "your", etc.)
+   - User's strengths for this path (use "you have", "your experience", etc.)
+   - Areas needing development (use "you should focus on", "you could improve", etc.)
+   - Actionable recommendations (use "you can", "you should consider", etc.)
 
-4. Return top 5 matches in JSON format:
+4. IMPORTANT: All text should be written as if you are speaking directly to the user. Use "you", "your", "you have", "you should", etc. Never refer to the user in third person.
+
+5. Return top 5 matches in JSON format:
 {
   "matches": [
     {
       "careerPathId": "path_id",
       "matchScore": 85,
-      "reasoning": "Detailed explanation of why this path matches",
-      "strengths": ["strength1", "strength2", "strength3"],
-      "developmentAreas": ["area1", "area2"],
-      "recommendations": ["rec1", "rec2", "rec3"]
+      "reasoning": "Your background in [field] aligns perfectly with this role because...",
+      "strengths": ["You have strong skills in X", "Your experience with Y", "Your interest in Z"],
+      "developmentAreas": ["You should focus on developing X", "You could improve your Y skills"],
+      "recommendations": ["You can start by taking courses in X", "You should consider building projects in Y", "You might benefit from networking in Z"]
     }
   ]
 }
 
-Focus on realistic, actionable matches that consider the user's current situation and career stage.`;
+Focus on realistic, actionable matches that consider the user's current situation and career stage. Remember to always speak directly to the user using second person pronouns.`;
 
     try {
         log('Generating AI analysis...');
@@ -196,8 +198,9 @@ function buildContextPrompt(talent, careerStage, responses, currentCareerPath) {
 
     let prompt = `CAREER MATCHING ANALYSIS
 
+You are providing personalized career guidance to a user. Analyze their profile and speak directly to them using "you", "your", etc.
+
 USER PROFILE:
-- Name: ${talent.fullname}
 - Career Stage: ${careerStage} (${careerStageDescriptions[careerStage]})
 - Age: ${calculateAge(talent.dateofBirth)}
 - Education: ${responses.degrees.join(', ')}
@@ -233,7 +236,7 @@ function calculateAge(dateOfBirth) {
 }
 
 function generateFallbackMatches(responses, careerPaths, careerStage) {
-    // Simple rule-based matching as fallback
+    // Simple rule-based matching as fallback - also using direct user language
     const matches = careerPaths.map(path => {
         let score = 0;
         
@@ -270,10 +273,10 @@ function generateFallbackMatches(responses, careerPaths, careerStage) {
         return {
             careerPath: path,
             matchScore: Math.min(score, 100),
-            reasoning: `Matched based on ${skillMatches} skills, ${interestMatches} interests, and field alignment.`,
-            strengths: responses.skills.slice(0, 3),
-            developmentAreas: ['Technical Skills', 'Industry Knowledge'],
-            recommendations: ['Take relevant courses', 'Build portfolio projects', 'Network in the industry']
+            reasoning: `Your profile matches this path based on your ${skillMatches} relevant skills, ${interestMatches} shared interests, and alignment with your preferred field.`,
+            strengths: responses.skills.slice(0, 3).map(skill => `You have experience with ${skill}`),
+            developmentAreas: ['You should focus on developing technical skills', 'You could improve your industry knowledge'],
+            recommendations: ['You can take relevant courses to build expertise', 'You should consider building portfolio projects', 'You might benefit from networking in the industry']
         };
     });
     
