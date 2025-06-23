@@ -342,12 +342,27 @@ export default async ({ req, res, log, error }) => {
 
       case 'updateUserProfile':
         checkTimeout();
-        log(`Updating profile for user: ${data.userId}`);
+        log(`Updating profile for talent ID: ${data.talentId}`);
         
+        // First, find the document by talentId
+        const talentQuery = await databases.listDocuments(
+          config.databaseId,
+          config.talentsCollectionId,
+          [Query.equal('talentId', data.talentId)]
+        );
+        
+        if (talentQuery.documents.length === 0) {
+          throw new Error(`Talent not found with ID: ${data.talentId}`);
+        }
+        
+        const talentDocument = talentQuery.documents[0];
+        log(`Found talent document with Document ID: ${talentDocument.$id}`);
+        
+        // Now update using the actual document ID
         const updatedUser = await databases.updateDocument(
           config.databaseId,
           config.talentsCollectionId,
-          data.userId,
+          talentDocument.$id, // Use the actual document ID
           {
             ...data.profileUpdates,
             testTaken: true,
