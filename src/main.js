@@ -1,5 +1,5 @@
-const { Client, Databases, Query } = require('node-appwrite');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+import { Client, Databases, Query } from 'node-appwrite';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Initialize client
 const client = new Client()
@@ -10,7 +10,7 @@ const client = new Client()
 const databases = new Databases(client);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-module.exports = async ({ req, res, log, error }) => {
+export default async ({ req, res, log, error }) => {
     try {
         log('Starting AI career matching...');
         
