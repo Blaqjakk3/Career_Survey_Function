@@ -1,0 +1,28 @@
+{
+  "name": "career-path-matching-function",
+  "version": "1.0.0",
+  "description": "Appwrite Function for AI-powered career path matching using Gemini AI",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node main.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "node-appwrite": "^13.0.0",
+    "@google/generative-ai": "^0.17.1"
+  },
+  "keywords": [
+    "appwrite",
+    "serverless",
+    "career-matching",
+    "ai",
+    "gemini",
+    "career-assessment"
+  ],
+  "author": "Career4Me Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
