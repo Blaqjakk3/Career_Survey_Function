@@ -92,7 +92,7 @@ export default async ({ req, res, log, error }) => {
 };
 
 async function generateAICareerMatches(talent, careerStage, responses, careerPaths, currentCareerPath, log) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
     // Build comprehensive context for AI analysis
     const contextPrompt = buildContextPrompt(talent, careerStage, responses, currentCareerPath);
