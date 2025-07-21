@@ -29,7 +29,7 @@ export default async ({ req, res, log, error }) => {
         const careerPathsQuery = await databases.listDocuments(
             'career4me',
             'careerPaths',
-            [Query.limit(100)]
+            [Query.limit(200)] // Increased limit to get more career paths
         );
 
         if (careerPathsQuery.documents.length === 0) {
@@ -49,7 +49,7 @@ export default async ({ req, res, log, error }) => {
 
         const talent = talentQuery.documents[0];
 
-        // Get current career path details if available
+        // Get current career path details if available (for Trailblazer and Horizon Changer)
         let currentCareerPath = null;
         if (responses.currentPath) {
             try {
@@ -73,12 +73,13 @@ export default async ({ req, res, log, error }) => {
             log
         );
 
-        log('Career matching completed successfully');
+        log(`Career matching completed successfully with ${matches.length} matches`);
         return res.json({
             success: true,
             matches: matches,
             totalPaths: careerPathsQuery.documents.length,
-            matchedPaths: matches.length
+            matchedPaths: matches.length,
+            careerStage: careerStage
         });
 
     } catch (err) {
@@ -92,24 +93,32 @@ export default async ({ req, res, log, error }) => {
 };
 
 async function generateAICareerMatches(talent, careerStage, responses, careerPaths, currentCareerPath, log) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
     // Build comprehensive context for AI analysis
     const contextPrompt = buildContextPrompt(talent, careerStage, responses, currentCareerPath);
     
-    // Create career paths summary for AI
+    // Create career paths summary for AI - include all relevant fields
     const careerPathsSummary = careerPaths.map(path => ({
         id: path.$id,
         title: path.title,
         industry: path.industry,
         requiredSkills: path.requiredSkills || [],
         requiredInterests: path.requiredInterests || [],
+        requiredCertifications: path.requiredCertifications || [],
         suggestedDegrees: path.suggestedDegrees || [],
         description: path.description || '',
         minSalary: path.minSalary || 0,
         maxSalary: path.maxSalary || 0,
+        jobOutlook: path.jobOutlook || '',
+        dayToDayResponsibilities: path.dayToDayResponsibilities || '',
+        toolsAndTechnologies: path.toolsAndTechnologies || [],
+        careerProgression: path.careerProgression || '',
+        typicalEmployers: path.typicalEmployers || [],
         required_background: path.required_background || '',
-        time_to_complete: path.time_to_complete || ''
+        time_to_complete: path.time_to_complete || '',
+        learning_style: path.learning_style || '',
+        tags: path.tags || []
     }));
 
     const analysisPrompt = `${contextPrompt}
@@ -118,170 +127,183 @@ AVAILABLE CAREER PATHS:
 ${JSON.stringify(careerPathsSummary, null, 2)}
 
 ANALYSIS REQUIREMENTS:
-1. Analyze the user's profile against each career path
-2. Consider career stage-specific factors:
-   - Pathfinder: Focus on learning potential, entry requirements, growth opportunities
-   - Trailblazer: Focus on career advancement, skill building, leadership opportunities  
-   - Horizon Changer: Focus on transferable skills, transition feasibility, motivation alignment
+You are a professional career counselor providing personalized career guidance. Analyze the user's complete profile against all available career paths and provide detailed, actionable recommendations.
 
-3. Provide detailed matching with:
-   - Match score (0-100)
-   - Specific reasoning for the match (SPEAK DIRECTLY TO THE USER using "you", "your", etc.)
-   - User's strengths for this path (use "you have", "your experience", etc.)
-   - Areas needing development (use "you should focus on", "you could improve", etc.)
-   - Actionable recommendations (use "you can", "you should consider", etc.)
+KEY ANALYSIS FACTORS:
+1. **Skills Alignment**: Match current skills and learning interests with required skills
+2. **Education Compatibility**: Consider current education level and degree programs
+3. **Interest Matching**: Align personal interests with career requirements and daily responsibilities
+4. **Growth Potential**: Consider career progression opportunities and job outlook
+5. **Work Environment Fit**: Match preferred work environments with typical career settings
+6. **Entry Requirements**: Assess feasibility based on current background and required prerequisites
+7. **Learning Path**: Consider time to complete and required background for career entry
 
-4. IMPORTANT: All text should be written as if you are speaking directly to the user. Use "you", "your", "you have", "you should", etc. Never refer to the user in third person.
+CAREER STAGE SPECIFIC CONSIDERATIONS:
+- **Pathfinder**: Focus on entry-level opportunities, learning potential, foundational skill building, and paths that match educational level
+- **Trailblazer**: Emphasize career advancement, skill building, leadership opportunities, and progression from current role
+- **Horizon Changer**: Highlight transferable skills, transition feasibility, retraining requirements, and motivation alignment
 
-5. Return top 5 matches in JSON format:
+MATCHING CRITERIA:
+- Use information from BOTH the career paths database AND your knowledge of careers to provide comprehensive analysis
+- Consider industry trends, job market conditions, and emerging opportunities
+- Factor in salary expectations, work-life balance, and growth trajectory
+- Assess both immediate opportunities and long-term career development
+
+RESPONSE FORMAT:
+Return EXACTLY 5 career matches in this JSON format (NO additional text outside the JSON):
+
 {
   "matches": [
     {
-      "careerPathId": "path_id",
+      "careerPathId": "exact_path_id_from_database",
       "matchScore": 85,
-      "reasoning": "Your background in [field] aligns perfectly with this role because...",
-      "strengths": ["You have strong skills in X", "Your experience with Y", "Your interest in Z"],
-      "developmentAreas": ["You should focus on developing X", "You could improve your Y skills"],
-      "recommendations": ["You can start by taking courses in X", "You should consider building projects in Y", "You might benefit from networking in Z"]
+      "reasoning": "Your background in [specific area] makes you an excellent fit for this role because [detailed explanation]. Your interest in [specific interest] aligns perfectly with the daily responsibilities which include [specific examples]. The role requires [specific skills] which you either possess or have shown interest in developing.",
+      "strengths": [
+        "You already have experience with [specific skill/area]",
+        "Your educational background in [field] provides a solid foundation",
+        "Your interest in [area] directly supports the core responsibilities"
+      ],
+      "developmentAreas": [
+        "You should focus on developing [specific technical skill] through [specific suggestion]",
+        "Consider gaining experience in [specific area] by [actionable step]",
+        "You could strengthen your background in [area] by [specific recommendation]"
+      ],
+      "recommendations": [
+        "Start by taking [specific course/certification] to build foundational knowledge",
+        "Consider seeking internships or projects in [specific area] to gain practical experience",
+        "Network with professionals in [industry] through [specific platforms/events]",
+        "Build a portfolio showcasing [specific skills] by [specific projects]"
+      ]
     }
   ]
 }
 
-Focus on realistic, actionable matches that consider the user's current situation and career stage. Remember to always speak directly to the user using second person pronouns.`;
+IMPORTANT GUIDELINES:
+- ALL text must speak directly to the user using "you", "your", "you have", "you should", etc.
+- Be specific and actionable in all recommendations
+- Reference actual skills, interests, and background from the user's profile
+- Match careerPathId exactly with the database IDs provided
+- Provide realistic timelines and expectations
+- Consider both immediate opportunities and growth potential
+- Include specific tools, technologies, or certifications mentioned in career paths
+- Factor in salary ranges and job outlook information where relevant
+
+Generate realistic, well-reasoned matches that consider the user's complete profile and career stage.`; 
 
     try {
-        log('Generating AI analysis...');
+        log('Generating AI analysis with Gemini 2.5 Flash...');
         const result = await model.generateContent(analysisPrompt);
         const aiResponse = result.response.text();
+        
+        log('AI Response received, parsing JSON...');
         
         // Extract JSON from AI response
         const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
-            throw new Error('AI response does not contain valid JSON');
+            log('No valid JSON found in AI response');
+            throw new Error('AI response did not contain valid JSON');
         }
         
         const analysisResult = JSON.parse(jsonMatch[0]);
         
-        // Enrich matches with full career path data
-        const enrichedMatches = analysisResult.matches.map(match => {
-            const careerPath = careerPaths.find(path => path.$id === match.careerPathId);
-            return {
-                careerPath: careerPath,
-                matchScore: match.matchScore,
-                reasoning: match.reasoning,
-                strengths: match.strengths,
-                developmentAreas: match.developmentAreas,
-                recommendations: match.recommendations
-            };
-        }).filter(match => match.careerPath); // Remove any matches where career path wasn't found
-
-        // Sort by match score descending
-        enrichedMatches.sort((a, b) => b.matchScore - a.matchScore);
+        if (!analysisResult.matches || !Array.isArray(analysisResult.matches)) {
+            log('Invalid matches structure in AI response');
+            throw new Error('AI response contains invalid matches structure');
+        }
         
-        log(`Generated ${enrichedMatches.length} career matches`);
+        // Enrich matches with full career path data and validate
+        const enrichedMatches = analysisResult.matches
+            .map(match => {
+                const careerPath = careerPaths.find(cp => cp.$id === match.careerPathId);
+                if (!careerPath) {
+                    log(`Warning: Career path not found for ID: ${match.careerPathId}`);
+                    return null;
+                }
+                
+                return {
+                    ...match,
+                    careerPath: {
+                        id: careerPath.$id,
+                        title: careerPath.title,
+                        industry: careerPath.industry,
+                        description: careerPath.description,
+                        minSalary: careerPath.minSalary,
+                        maxSalary: careerPath.maxSalary,
+                        jobOutlook: careerPath.jobOutlook,
+                        requiredSkills: careerPath.requiredSkills || [],
+                        suggestedDegrees: careerPath.suggestedDegrees || [],
+                        dayToDayResponsibilities: careerPath.dayToDayResponsibilities,
+                        careerProgression: careerPath.careerProgression,
+                        toolsAndTechnologies: careerPath.toolsAndTechnologies || [],
+                        typicalEmployers: careerPath.typicalEmployers || []
+                    }
+                };
+            })
+            .filter(match => match !== null);
+            
+        log(`Successfully processed ${enrichedMatches.length} career matches`);
         return enrichedMatches;
-
-    } catch (err) {
-        log('AI analysis failed, falling back to rule-based matching');
         
-        // Fallback to simpler rule-based matching
-        return generateFallbackMatches(responses, careerPaths, careerStage);
+    } catch (err) {
+        log(`AI generation failed: ${err.message}`);
+        throw new Error(`Failed to generate AI career matches: ${err.message}`);
     }
 }
 
 function buildContextPrompt(talent, careerStage, responses, currentCareerPath) {
-    const careerStageDescriptions = {
-        'Pathfinder': 'Someone finding their feet in career life, looking for their career and learning',
-        'Trailblazer': 'Someone with a career looking to continue growth',
-        'Horizon Changer': 'Someone in a career path looking to pivot to another one'
-    };
+    let context = `TALENT PROFILE ANALYSIS:
 
-    let prompt = `CAREER MATCHING ANALYSIS
+CAREER STAGE: ${careerStage}
+TALENT ID: ${talent.talentId}
 
-You are providing personalized career guidance to a user. Analyze their profile and speak directly to them using "you", "your", etc.
+PERSONAL INFORMATION:
+- Name: ${talent.name || 'Not provided'}
+- Email: ${talent.email || 'Not provided'}
+- Phone: ${talent.phoneNumber || 'Not provided'}
+- Age: ${talent.age || 'Not provided'}
+- Location: ${talent.location || 'Not provided'}
+- Gender: ${talent.gender || 'Not provided'}
 
-USER PROFILE:
-- Career Stage: ${careerStage} (${careerStageDescriptions[careerStage]})
-- Age: ${calculateAge(talent.dateofBirth)}
-- Education: ${responses.degrees.join(', ')}
-- Current Skills: ${responses.skills.join(', ')}
-- Interests: ${responses.interests.join(', ')}
-- Interested Fields: ${responses.interestedFields.join(', ')}`;
+EDUCATION & BACKGROUND:
+- Education Level: ${responses.educationLevel || talent.educationLevel || 'Not provided'}
+- Degree(s): ${responses.degrees ? responses.degrees.join(', ') : (talent.degrees || 'Not provided')}
+- Previous Experience: ${talent.experience || 'Not provided'}
+
+SKILLS PROFILE:
+- Current Skills: ${responses.skills ? responses.skills.join(', ') : (talent.skills || 'Not provided')}
+- Skills of Interest: ${responses.interestedSkills ? responses.interestedSkills.join(', ') : 'Not provided'}
+
+INTERESTS & PREFERENCES:
+- Main Interests: ${responses.interests ? responses.interests.join(', ') : (talent.interests || 'Not provided')}
+- Fields of Interest: ${responses.interestedFields ? responses.interestedFields.join(', ') : (talent.interestedFields || 'Not provided')}
+- Preferred Work Environment: ${responses.preferredWorkEnvironment ? responses.preferredWorkEnvironment.join(', ') : 'Not provided'}
+
+ADDITIONAL CONTEXT:
+${responses.additionalContext || 'No additional context provided'}`;
+
+    // Add career stage specific information
+    if (careerStage === 'Trailblazer' && responses.currentPosition) {
+        context += `\n\nCURRENT CAREER STATUS:
+- Current Position: ${responses.currentPosition}
+- Years of Experience: ${responses.yearsExperience || 'Not provided'}
+- Seniority Level: ${responses.seniorityLevel || 'Not provided'}
+- Career Goals: ${responses.careerGoals ? responses.careerGoals.join(', ') : 'Not provided'}`;
+    }
+
+    if (careerStage === 'Horizon Changer' && responses.currentField) {
+        context += `\n\nCAREER CHANGE CONTEXT:
+- Current Field: ${responses.currentField}
+- Reasons for Change: ${responses.changeReasons ? responses.changeReasons.join(', ') : 'Not provided'}
+- Change Urgency: ${responses.changeUrgency || 'Not provided'}
+- Willing to Retrain: ${responses.willingToRetrain || 'Not provided'}`;
+    }
 
     if (currentCareerPath) {
-        prompt += `\n- Current Career Path: ${currentCareerPath.title} (${currentCareerPath.industry})`;
-        prompt += `\n- Current Seniority Level: ${responses.currentSeniorityLevel}`;
+        context += `\n\nCURRENT CAREER PATH DETAILS:
+- Title: ${currentCareerPath.title}
+- Industry: ${currentCareerPath.industry}
+- Description: ${currentCareerPath.description || 'Not provided'}`;
     }
 
-    if (responses.additionalContext) {
-        prompt += `\n- Additional Context: ${responses.additionalContext}`;
-    }
-
-    return prompt;
-}
-
-function calculateAge(dateOfBirth) {
-    if (!dateOfBirth) return 'Not specified';
-    
-    const birth = new Date(dateOfBirth);
-    const today = new Date();
-    let age = today.getFullYear() - birth.getFullYear();
-    const monthDiff = today.getMonth() - birth.getMonth();
-    
-    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) {
-        age--;
-    }
-    
-    return age;
-}
-
-function generateFallbackMatches(responses, careerPaths, careerStage) {
-    // Simple rule-based matching as fallback - also using direct user language
-    const matches = careerPaths.map(path => {
-        let score = 0;
-        
-        // Skills matching
-        const skillMatches = (path.requiredSkills || []).filter(skill => 
-            responses.skills.includes(skill)
-        ).length;
-        score += skillMatches * 20;
-        
-        // Interest matching  
-        const interestMatches = (path.requiredInterests || []).filter(interest => 
-            responses.interests.includes(interest)
-        ).length;
-        score += interestMatches * 15;
-        
-        // Field matching
-        if (responses.interestedFields.includes(path.industry)) {
-            score += 25;
-        }
-        
-        // Education matching
-        const hasRequiredEducation = (path.suggestedDegrees || []).some(degree => 
-            responses.degrees.includes(degree)
-        );
-        if (hasRequiredEducation) {
-            score += 20;
-        }
-        
-        // Career stage specific adjustments
-        if (careerStage === 'Pathfinder' && path.required_background === 'Entry Level') {
-            score += 10;
-        }
-        
-        return {
-            careerPath: path,
-            matchScore: Math.min(score, 100),
-            reasoning: `Your profile matches this path based on your ${skillMatches} relevant skills, ${interestMatches} shared interests, and alignment with your preferred field.`,
-            strengths: responses.skills.slice(0, 3).map(skill => `You have experience with ${skill}`),
-            developmentAreas: ['You should focus on developing technical skills', 'You could improve your industry knowledge'],
-            recommendations: ['You can take relevant courses to build expertise', 'You should consider building portfolio projects', 'You might benefit from networking in the industry']
-        };
-    });
-    
-    // Return top 5 matches
-    return matches
-        .sort((a, b) => b.matchScore - a.matchScore)
-        .slice(0, 5);
+    return context;
 }
