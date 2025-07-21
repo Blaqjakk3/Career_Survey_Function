@@ -10,6 +10,27 @@ const client = new Client()
 const databases = new Databases(client);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// Define which attributes exist in the talents collection
+const VALID_TALENT_ATTRIBUTES = [
+    'fullname',
+    'email', 
+    'avatar',
+    'careerStage',
+    'dateofBirth',
+    'talentId',
+    'selectedPath',
+    'degrees',
+    'certifications',
+    'skills',
+    'interests',
+    'currentPath',
+    'testTaken',
+    'interestedFields',
+    'savedPaths',
+    'currentSeniorityLevel',
+    'savedJobs'
+];
+
 export default async ({ req, res, log, error }) => {
     try {
         log('Starting AI career matching...');
@@ -49,16 +70,21 @@ export default async ({ req, res, log, error }) => {
 
         const talent = talentQuery.documents[0];
 
-        // Update talent document with survey responses
+        // Filter survey responses to only include valid database attributes
+        const validUpdates = filterValidAttributes(surveyResponses);
+        
+        // Always set testTaken to true
+        validUpdates.testTaken = true;
+
+        // Update talent document only with valid attributes
         await databases.updateDocument(
             'career4me',
             'talents',
             talent.$id,
-            {
-                ...surveyResponses,
-                testTaken: true
-            }
+            validUpdates
         );
+
+        log(`Updated talent with valid attributes: ${Object.keys(validUpdates).join(', ')}`);
 
         // Get current career path details if available
         let currentCareerPath = null;
@@ -74,10 +100,10 @@ export default async ({ req, res, log, error }) => {
             }
         }
 
-        // Generate AI-powered career matches
+        // Generate AI-powered career matches using ALL survey data
         const matches = await generateAICareerMatches(
             talent,
-            surveyResponses,
+            surveyResponses, // Pass complete survey responses to AI
             careerPathsQuery.documents,
             currentCareerPath,
             log
@@ -101,10 +127,31 @@ export default async ({ req, res, log, error }) => {
     }
 };
 
+/**
+ * Filter survey responses to only include valid database attributes
+ */
+function filterValidAttributes(surveyResponses) {
+    const validUpdates = {};
+    
+    // Map survey response fields to database fields where they match
+    for (const [key, value] of Object.entries(surveyResponses)) {
+        if (VALID_TALENT_ATTRIBUTES.includes(key)) {
+            // Handle array fields that need to be converted to strings
+            if (Array.isArray(value) && ['skills', 'interests', 'interestedFields', 'savedJobs'].includes(key)) {
+                validUpdates[key] = value.join(', '); // Convert array to comma-separated string
+            } else {
+                validUpdates[key] = value;
+            }
+        }
+    }
+    
+    return validUpdates;
+}
+
 async function generateAICareerMatches(talent, surveyResponses, careerPaths, currentCareerPath, log) {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-    // Build comprehensive context for AI analysis
+    // Build comprehensive context for AI analysis using ALL survey data
     const contextPrompt = buildContextPrompt(talent, surveyResponses, currentCareerPath);
     
     // Create simplified career paths summary for AI (to reduce token usage)
@@ -220,6 +267,7 @@ function buildContextPrompt(talent, surveyResponses, currentCareerPath) {
         prompt += `\n- Degree Program: ${surveyResponses.degreeProgram}`;
     }
 
+    // Use survey response arrays directly (not stored in database)
     prompt += `\n- Current Skills: ${(surveyResponses.currentSkills || []).join(', ')}
 - Skills to Learn: ${(surveyResponses.skillsToLearn || []).join(', ')}
 - Interests: ${(surveyResponses.interests || []).join(', ')}
