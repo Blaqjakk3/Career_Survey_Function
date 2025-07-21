@@ -31,6 +31,17 @@ const VALID_TALENT_ATTRIBUTES = [
     'savedJobs'
 ];
 
+// Define which fields are arrays in the database
+const ARRAY_ATTRIBUTES = [
+    'degrees',
+    'certifications', 
+    'skills',
+    'interests',
+    'interestedFields',
+    'savedPaths',
+    'savedJobs'
+];
+
 export default async ({ req, res, log, error }) => {
     try {
         log('Starting AI career matching...');
@@ -75,6 +86,8 @@ export default async ({ req, res, log, error }) => {
         
         // Always set testTaken to true
         validUpdates.testTaken = true;
+
+        log(`Attempting to update talent with: ${JSON.stringify(validUpdates, null, 2)}`);
 
         // Update talent document only with valid attributes
         await databases.updateDocument(
@@ -136,9 +149,17 @@ function filterValidAttributes(surveyResponses) {
     // Map survey response fields to database fields where they match
     for (const [key, value] of Object.entries(surveyResponses)) {
         if (VALID_TALENT_ATTRIBUTES.includes(key)) {
-            // Handle array fields that need to be converted to strings
-            if (Array.isArray(value) && ['skills', 'interests', 'interestedFields', 'savedJobs'].includes(key)) {
-                validUpdates[key] = value.join(', '); // Convert array to comma-separated string
+            // Handle array fields - keep them as arrays for Appwrite
+            if (ARRAY_ATTRIBUTES.includes(key)) {
+                // Ensure it's an array
+                if (Array.isArray(value)) {
+                    validUpdates[key] = value;
+                } else if (value) {
+                    // If it's a string, split it into an array
+                    validUpdates[key] = typeof value === 'string' ? value.split(', ').map(item => item.trim()) : [value];
+                } else {
+                    validUpdates[key] = [];
+                }
             } else {
                 validUpdates[key] = value;
             }
