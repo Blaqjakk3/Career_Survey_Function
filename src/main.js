@@ -12,39 +12,26 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Define which attributes exist in the talents collection
 const VALID_TALENT_ATTRIBUTES = [
-    'fullname',
-    'email', 
-    'avatar',
-    'careerStage',
-    'dateofBirth',
-    'talentId',
-    'selectedPath',
-    'degrees',
-    'certifications',
-    'skills',
-    'interests',
-    'currentPath',
-    'testTaken',
-    'interestedFields',
-    'savedPaths',
-    'currentSeniorityLevel',
-    'savedJobs'
+    'fullname', 'email', 'avatar', 'careerStage', 'dateofBirth', 'talentId',
+    'selectedPath', 'degrees', 'certifications', 'skills', 'interests',
+    'currentPath', 'testTaken', 'interestedFields', 'savedPaths',
+    'currentSeniorityLevel', 'savedJobs'
 ];
 
-// Define which fields are arrays in the database
 const ARRAY_ATTRIBUTES = [
-    'degrees',
-    'certifications', 
-    'skills',
-    'interests',
-    'interestedFields',
-    'savedPaths',
-    'savedJobs'
+    'degrees', 'certifications', 'skills', 'interests', 
+    'interestedFields', 'savedPaths', 'savedJobs'
 ];
+
+// Set execution timeout to 25 seconds to avoid 30s limit
+const EXECUTION_TIMEOUT = 25000;
+const AI_TIMEOUT = 15000; // 15 seconds for AI analysis
 
 export default async ({ req, res, log, error }) => {
+    const startTime = Date.now();
+    
     try {
-        log('Starting AI career matching...');
+        log('Starting optimized AI career matching...');
         
         const { talentId, surveyResponses } = JSON.parse(req.body);
 
@@ -55,111 +42,263 @@ export default async ({ req, res, log, error }) => {
             }, 400);
         }
 
-        log(`Processing career matching for talent: ${talentId}`);
-
-        // Fetch all available career paths
-        const careerPathsQuery = await databases.listDocuments(
-            'career4me',
-            'careerPaths',
-            [Query.limit(100)]
-        );
-
-        if (careerPathsQuery.documents.length === 0) {
-            return res.json({ success: false, error: 'No career paths available' }, 404);
-        }
-
-        // Fetch talent details
-        const talentQuery = await databases.listDocuments(
-            'career4me',
-            'talents',
-            [Query.equal('talentId', talentId)]
-        );
-
-        if (talentQuery.documents.length === 0) {
-            return res.json({ success: false, error: 'Talent not found' }, 404);
-        }
-
-        const talent = talentQuery.documents[0];
-
-        // Filter survey responses to only include valid database attributes
-        const validUpdates = filterValidAttributes(surveyResponses);
-        
-        // Always set testTaken to true
-        validUpdates.testTaken = true;
-
-        log(`Attempting to update talent with: ${JSON.stringify(validUpdates, null, 2)}`);
-
-        // Update talent document only with valid attributes
-        await databases.updateDocument(
-            'career4me',
-            'talents',
-            talent.$id,
-            validUpdates
-        );
-
-        log(`Updated talent with valid attributes: ${Object.keys(validUpdates).join(', ')}`);
-
-        // Get current career path details if available
-        let currentCareerPath = null;
-        if (surveyResponses.currentPath) {
-            try {
-                currentCareerPath = await databases.getDocument(
-                    'career4me',
-                    'careerPaths',
-                    surveyResponses.currentPath
-                );
-            } catch (err) {
-                log(`Warning: Could not fetch current career path: ${surveyResponses.currentPath}`);
-            }
-        }
-
-        // Generate AI-powered career matches using ALL survey data
-        const matches = await generateAICareerMatches(
-            talent,
-            surveyResponses, // Pass complete survey responses to AI
-            careerPathsQuery.documents,
-            currentCareerPath,
-            log
-        );
-
-        log('Career matching completed successfully');
-        return res.json({
-            success: true,
-            matches: matches,
-            totalPaths: careerPathsQuery.documents.length,
-            matchedPaths: matches.length
+        // Set up timeout for entire execution
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Function execution timeout')), EXECUTION_TIMEOUT);
         });
 
+        const executionPromise = executeCareerMatching(talentId, surveyResponses, log, error);
+        
+        // Race between execution and timeout
+        const result = await Promise.race([executionPromise, timeoutPromise]);
+        
+        const executionTime = Date.now() - startTime;
+        log(`Total execution time: ${executionTime}ms`);
+        
+        return res.json(result);
+
     } catch (err) {
-        error('Career matching failed:', err);
+        const executionTime = Date.now() - startTime;
+        error(`Career matching failed after ${executionTime}ms:`, err);
+        
         return res.json({ 
             success: false, 
             error: err.message || 'Failed to generate career matches',
+            executionTime: executionTime,
             details: process.env.NODE_ENV === 'development' ? err.stack : undefined
         }, 500);
     }
 };
 
-/**
- * Filter survey responses to only include valid database attributes
- */
+async function executeCareerMatching(talentId, surveyResponses, log, error) {
+    // Fetch talent and career paths in parallel
+    const [talentQuery, careerPathsQuery] = await Promise.all([
+        databases.listDocuments('career4me', 'talents', [Query.equal('talentId', talentId)]),
+        databases.listDocuments('career4me', 'careerPaths', [Query.limit(50)]) // Reduced from 100
+    ]);
+
+    if (careerPathsQuery.documents.length === 0) {
+        throw new Error('No career paths available');
+    }
+
+    if (talentQuery.documents.length === 0) {
+        throw new Error('Talent not found');
+    }
+
+    const talent = talentQuery.documents[0];
+
+    // Update talent document (non-blocking)
+    const validUpdates = filterValidAttributes(surveyResponses);
+    validUpdates.testTaken = true;
+    
+    // Don't await this - let it run in background
+    databases.updateDocument('career4me', 'talents', talent.$id, validUpdates)
+        .catch(err => log(`Warning: Failed to update talent: ${err.message}`));
+
+    // Get current career path if available (with timeout)
+    let currentCareerPath = null;
+    if (surveyResponses.currentPath) {
+        try {
+            currentCareerPath = await Promise.race([
+                databases.getDocument('career4me', 'careerPaths', surveyResponses.currentPath),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
+            ]);
+        } catch (err) {
+            log(`Warning: Could not fetch current career path: ${err.message}`);
+        }
+    }
+
+    // Generate matches with timeout
+    const matches = await generateOptimizedAIMatches(
+        talent, surveyResponses, careerPathsQuery.documents, currentCareerPath, log
+    );
+
+    return {
+        success: true,
+        matches: matches,
+        totalPaths: careerPathsQuery.documents.length,
+        matchedPaths: matches.length
+    };
+}
+
+async function generateOptimizedAIMatches(talent, surveyResponses, careerPaths, currentCareerPath, log) {
+    try {
+        // Pre-filter career paths to reduce AI processing load
+        const relevantPaths = preFilterCareerPaths(surveyResponses, careerPaths);
+        log(`Pre-filtered to ${relevantPaths.length} relevant paths from ${careerPaths.length} total`);
+
+        const model = genAI.getGenerativeModel({ 
+            model: 'gemini-2.0-flash-exp', // Faster model
+            generationConfig: {
+                maxOutputTokens: 2048, // Limit response size
+                temperature: 0.3, // More focused responses
+            }
+        });
+
+        const contextPrompt = buildOptimizedContextPrompt(talent, surveyResponses, currentCareerPath);
+        const careerPathsSummary = createConcisePathSummary(relevantPaths);
+
+        const analysisPrompt = `${contextPrompt}
+
+CAREER PATHS (${relevantPaths.length}):
+${careerPathsSummary}
+
+Analyze and return TOP 3 matches as JSON:
+{
+  "matches": [
+    {
+      "careerPathId": "id",
+      "matchScore": 85,
+      "reasoning": "Brief 1-sentence match explanation",
+      "strengths": ["strength1", "strength2"],
+      "developmentAreas": ["area1", "area2"],
+      "recommendations": ["rec1", "rec2", "rec3"]
+    }
+  ]
+}
+
+Match based on: skills (40%), interests (30%), education (20%), fit (10%).`;
+
+        // AI analysis with timeout
+        const aiPromise = model.generateContent(analysisPrompt);
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('AI timeout')), AI_TIMEOUT)
+        );
+
+        const result = await Promise.race([aiPromise, timeoutPromise]);
+        const aiResponse = result.response.text();
+        
+        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            throw new Error('Invalid AI response format');
+        }
+        
+        const analysisResult = JSON.parse(jsonMatch[0]);
+        
+        // Enrich with full career path data
+        const enrichedMatches = analysisResult.matches.map(match => {
+            const careerPath = careerPaths.find(path => path.$id === match.careerPathId);
+            return careerPath ? {
+                careerPath,
+                matchScore: match.matchScore,
+                reasoning: match.reasoning,
+                strengths: match.strengths,
+                developmentAreas: match.developmentAreas,
+                recommendations: match.recommendations
+            } : null;
+        }).filter(Boolean);
+
+        log(`AI generated ${enrichedMatches.length} matches`);
+        return enrichedMatches.slice(0, 5);
+
+    } catch (err) {
+        log(`AI analysis failed (${err.message}), using fallback`);
+        return generateFastFallbackMatches(surveyResponses, careerPaths, talent.careerStage);
+    }
+}
+
+function preFilterCareerPaths(surveyResponses, careerPaths) {
+    // Quick filtering to reduce AI processing load
+    const interestedFields = surveyResponses.interestedFields || [];
+    const currentSkills = surveyResponses.currentSkills || [];
+    
+    if (interestedFields.length === 0 && currentSkills.length === 0) {
+        return careerPaths.slice(0, 20); // Return first 20 if no filters
+    }
+
+    const filtered = careerPaths.filter(path => {
+        // Field match
+        const fieldMatch = interestedFields.length === 0 || 
+            interestedFields.includes(path.industry);
+        
+        // Skill overlap
+        const pathSkills = path.requiredSkills || [];
+        const skillOverlap = currentSkills.some(skill => 
+            pathSkills.some(pathSkill => 
+                pathSkill.toLowerCase().includes(skill.toLowerCase()) ||
+                skill.toLowerCase().includes(pathSkill.toLowerCase())
+            )
+        );
+        
+        return fieldMatch || skillOverlap;
+    });
+
+    return filtered.length > 0 ? filtered.slice(0, 25) : careerPaths.slice(0, 15);
+}
+
+function createConcisePathSummary(paths) {
+    return paths.map(path => 
+        `${path.$id}:${path.title}(${path.industry})-Skills:${(path.requiredSkills || []).slice(0, 3).join(',')}`
+    ).join('\n');
+}
+
+function buildOptimizedContextPrompt(talent, surveyResponses, currentCareerPath) {
+    const age = calculateAge(talent.dateofBirth);
+    
+    let prompt = `USER: ${talent.careerStage}, Age:${age}
+Education: ${surveyResponses.educationLevel || 'Unknown'}`;
+    
+    if (surveyResponses.degreeProgram) prompt += ` - ${surveyResponses.degreeProgram}`;
+    
+    prompt += `
+Skills: ${(surveyResponses.currentSkills || []).join(', ')}
+Learning: ${(surveyResponses.skillsToLearn || []).join(', ')}
+Interests: ${(surveyResponses.interests || []).join(', ')}
+Fields: ${(surveyResponses.interestedFields || []).join(', ')}`;
+
+    if (currentCareerPath) {
+        prompt += `
+Current: ${currentCareerPath.title} (${surveyResponses.yearsExperience || '?'} yrs, ${surveyResponses.currentSeniorityLevel || '?'} level)`;
+    }
+
+    return prompt;
+}
+
+function generateFastFallbackMatches(surveyResponses, careerPaths, careerStage) {
+    const currentSkills = surveyResponses.currentSkills || [];
+    const interests = surveyResponses.interests || [];
+    const fields = surveyResponses.interestedFields || [];
+    
+    const scoredPaths = careerPaths.map(path => {
+        let score = 0;
+        
+        // Quick scoring algorithm
+        const skillMatches = (path.requiredSkills || [])
+            .filter(skill => currentSkills.includes(skill)).length;
+        score += skillMatches * 20;
+        
+        const interestMatches = (path.requiredInterests || [])
+            .filter(interest => interests.includes(interest)).length;
+        score += interestMatches * 15;
+        
+        if (fields.includes(path.industry)) score += 30;
+        
+        // Random factor for variety
+        score += Math.random() * 10;
+        
+        return {
+            careerPath: path,
+            matchScore: Math.min(Math.round(score), 100),
+            reasoning: `${skillMatches} skill matches and ${interestMatches} interest alignments`,
+            strengths: currentSkills.slice(0, 2).map(s => `Strong in ${s}`),
+            developmentAreas: ['Industry knowledge', 'Specialized skills'],
+            recommendations: ['Take courses', 'Build projects', 'Network']
+        };
+    });
+    
+    return scoredPaths
+        .sort((a, b) => b.matchScore - a.matchScore)
+        .slice(0, 3);
+}
+
 function filterValidAttributes(surveyResponses) {
     const validUpdates = {};
     
-    // Map survey response fields to database fields where they match
     for (const [key, value] of Object.entries(surveyResponses)) {
         if (VALID_TALENT_ATTRIBUTES.includes(key)) {
-            // Handle array fields - keep them as arrays for Appwrite
             if (ARRAY_ATTRIBUTES.includes(key)) {
-                // Ensure it's an array
-                if (Array.isArray(value)) {
-                    validUpdates[key] = value;
-                } else if (value) {
-                    // If it's a string, split it into an array
-                    validUpdates[key] = typeof value === 'string' ? value.split(', ').map(item => item.trim()) : [value];
-                } else {
-                    validUpdates[key] = [];
-                }
+                validUpdates[key] = Array.isArray(value) ? value : 
+                    (value ? [value] : []);
             } else {
                 validUpdates[key] = value;
             }
@@ -169,159 +308,8 @@ function filterValidAttributes(surveyResponses) {
     return validUpdates;
 }
 
-async function generateAICareerMatches(talent, surveyResponses, careerPaths, currentCareerPath, log) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-
-    // Build comprehensive context for AI analysis using ALL survey data
-    const contextPrompt = buildContextPrompt(talent, surveyResponses, currentCareerPath);
-    
-    // Create simplified career paths summary for AI (to reduce token usage)
-    const careerPathsSummary = careerPaths.map(path => ({
-        id: path.$id,
-        title: path.title,
-        industry: path.industry,
-        requiredSkills: (path.requiredSkills || []).slice(0, 8), // Limit to top skills
-        requiredInterests: path.requiredInterests || [],
-        suggestedDegrees: path.suggestedDegrees || [],
-        description: path.description ? path.description.substring(0, 200) + '...' : '', // Truncate description
-        minSalary: path.minSalary || 0,
-        maxSalary: path.maxSalary || 0,
-        required_background: path.required_background || '',
-        time_to_complete: path.time_to_complete || ''
-    }));
-
-    const analysisPrompt = `${contextPrompt}
-
-AVAILABLE CAREER PATHS (${careerPathsSummary.length} paths):
-${JSON.stringify(careerPathsSummary, null, 1)}
-
-MATCHING CRITERIA:
-- Pathfinder: Focus on learning potential, entry requirements, growth opportunities, work environment fit
-- Trailblazer: Focus on career advancement, skill building, leadership opportunities, goal alignment
-- Horizon Changer: Focus on transferable skills, transition feasibility, motivation for change, environment preferences
-
-ANALYSIS REQUIREMENTS:
-1. Analyze user profile against each career path efficiently
-2. Calculate match score (0-100) based on:
-   - Education alignment (20%)
-   - Skills match (30%)
-   - Interest alignment (25%)
-   - Work environment fit (15%)
-   - Career stage specific factors (10%)
-
-3. Provide top 5 matches with:
-   - Match score
-   - Brief reasoning (2-3 sentences max, speaking directly to user)
-   - Top 3 strengths for this path
-   - Top 2 development areas
-   - Top 3 actionable recommendations
-
-4. Use "you/your" language. Keep responses concise.
-
-Return ONLY valid JSON:
-{
-  "matches": [
-    {
-      "careerPathId": "path_id",
-      "matchScore": 85,
-      "reasoning": "Your skills in X and interest in Y make this a strong match...",
-      "strengths": ["You have strong X skills", "Your Y experience", "Your Z interest"],
-      "developmentAreas": ["Develop X skills", "Gain Y experience"],
-      "recommendations": ["Take X course", "Build Y project", "Network in Z field"]
-    }
-  ]
-}`;
-
-    try {
-        log('Generating AI analysis...');
-        const result = await model.generateContent(analysisPrompt);
-        const aiResponse = result.response.text();
-        
-        // Extract JSON from AI response
-        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-            throw new Error('AI response does not contain valid JSON');
-        }
-        
-        const analysisResult = JSON.parse(jsonMatch[0]);
-        
-        // Enrich matches with full career path data
-        const enrichedMatches = analysisResult.matches.map(match => {
-            const careerPath = careerPaths.find(path => path.$id === match.careerPathId);
-            return {
-                careerPath: careerPath,
-                matchScore: match.matchScore,
-                reasoning: match.reasoning,
-                strengths: match.strengths,
-                developmentAreas: match.developmentAreas,
-                recommendations: match.recommendations
-            };
-        }).filter(match => match.careerPath);
-
-        // Sort by match score descending
-        enrichedMatches.sort((a, b) => b.matchScore - a.matchScore);
-        
-        log(`Generated ${enrichedMatches.length} career matches`);
-        return enrichedMatches.slice(0, 5); // Ensure max 5 results
-
-    } catch (err) {
-        log('AI analysis failed, falling back to rule-based matching');
-        
-        // Fallback to simpler rule-based matching
-        return generateFallbackMatches(surveyResponses, careerPaths, talent.careerStage);
-    }
-}
-
-function buildContextPrompt(talent, surveyResponses, currentCareerPath) {
-    const careerStageDescriptions = {
-        'Pathfinder': 'Finding their feet in career life, looking for career direction and learning opportunities',
-        'Trailblazer': 'Established professional looking to continue growth in their career',
-        'Horizon Changer': 'Professional looking to pivot to a different career path'
-    };
-
-    let prompt = `USER PROFILE - ${talent.careerStage}:
-- Stage: ${talent.careerStage} (${careerStageDescriptions[talent.careerStage]})
-- Age: ${calculateAge(talent.dateofBirth)}
-- Education Level: ${surveyResponses.educationLevel || 'Not specified'}`;
-
-    if (surveyResponses.degreeProgram) {
-        prompt += `\n- Degree Program: ${surveyResponses.degreeProgram}`;
-    }
-
-    // Use survey response arrays directly (not stored in database)
-    prompt += `\n- Current Skills: ${(surveyResponses.currentSkills || []).join(', ')}
-- Skills to Learn: ${(surveyResponses.skillsToLearn || []).join(', ')}
-- Interests: ${(surveyResponses.interests || []).join(', ')}
-- Interested Fields: ${(surveyResponses.interestedFields || []).join(', ')}`;
-
-    if (surveyResponses.workEnvironmentPreference) {
-        prompt += `\n- Work Environment Preference: ${surveyResponses.workEnvironmentPreference}`;
-    }
-
-    if (surveyResponses.currentWorkEnvironment) {
-        prompt += `\n- Current Work Environment: ${surveyResponses.currentWorkEnvironment}`;
-    }
-
-    if (currentCareerPath) {
-        prompt += `\n- Current Career Path: ${currentCareerPath.title} (${currentCareerPath.industry})
-- Experience: ${surveyResponses.yearsExperience || 'Not specified'} years
-- Seniority: ${surveyResponses.currentSeniorityLevel || 'Not specified'}`;
-    }
-
-    if (surveyResponses.careerGoals) {
-        prompt += `\n- Career Goals: ${surveyResponses.careerGoals}`;
-    }
-
-    if (surveyResponses.reasonForChange) {
-        prompt += `\n- Reason for Change: ${surveyResponses.reasonForChange}
-- Change Urgency: ${surveyResponses.changeUrgency || 'Not specified'}`;
-    }
-
-    return prompt;
-}
-
 function calculateAge(dateOfBirth) {
-    if (!dateOfBirth) return 'Not specified';
+    if (!dateOfBirth) return '?';
     
     const birth = new Date(dateOfBirth);
     const today = new Date();
@@ -333,61 +321,4 @@ function calculateAge(dateOfBirth) {
     }
     
     return age;
-}
-
-function generateFallbackMatches(surveyResponses, careerPaths, careerStage) {
-    // Simple rule-based matching as fallback
-    const matches = careerPaths.map(path => {
-        let score = 0;
-        
-        // Skills matching
-        const currentSkills = surveyResponses.currentSkills || [];
-        const skillMatches = (path.requiredSkills || []).filter(skill => 
-            currentSkills.includes(skill)
-        ).length;
-        score += skillMatches * 15;
-        
-        // Interest matching  
-        const interests = surveyResponses.interests || [];
-        const interestMatches = (path.requiredInterests || []).filter(interest => 
-            interests.includes(interest)
-        ).length;
-        score += interestMatches * 20;
-        
-        // Field matching
-        const interestedFields = surveyResponses.interestedFields || [];
-        if (interestedFields.includes(path.industry)) {
-            score += 25;
-        }
-        
-        // Education matching
-        if (surveyResponses.degreeProgram) {
-            const hasRequiredEducation = (path.suggestedDegrees || []).includes(surveyResponses.degreeProgram);
-            if (hasRequiredEducation) {
-                score += 20;
-            }
-        }
-        
-        // Career stage specific adjustments
-        if (careerStage === 'Pathfinder' && path.required_background === 'Entry Level') {
-            score += 15;
-        }
-        
-        const skillsCount = currentSkills.length;
-        const interestsCount = interests.length;
-        
-        return {
-            careerPath: path,
-            matchScore: Math.min(score, 100),
-            reasoning: `Your profile shows ${skillMatches} relevant skills and ${interestMatches} matching interests with this career path.`,
-            strengths: currentSkills.slice(0, 3).map(skill => `You have ${skill} skills`),
-            developmentAreas: ['Develop specialized skills', 'Gain industry experience'],
-            recommendations: ['Take relevant courses', 'Build portfolio projects', 'Network with professionals']
-        };
-    });
-    
-    // Return top 5 matches
-    return matches
-        .sort((a, b) => b.matchScore - a.matchScore)
-        .slice(0, 5);
 }
