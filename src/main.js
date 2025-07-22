@@ -1,20 +1,37 @@
 import { Client, Databases, Query } from 'node-appwrite';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-export default async function (req, res) {
+export default async function (context) {
   try {
     // Access environment variables correctly for Appwrite Cloud Functions
-    const APPWRITE_ENDPOINT = req.variables?.APPWRITE_ENDPOINT || process.env.APPWRITE_ENDPOINT;
-    const APPWRITE_PROJECT_ID = req.variables?.APPWRITE_PROJECT_ID || process.env.APPWRITE_PROJECT_ID;
-    const APPWRITE_API_KEY = req.variables?.APPWRITE_API_KEY || process.env.APPWRITE_API_KEY;
-    const GEMINI_API_KEY = req.variables?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    const APPWRITE_USER_ID = req.variables?.APPWRITE_USER_ID || process.env.APPWRITE_USER_ID;
-    const DATABASE_ID = req.variables?.DATABASE_ID || process.env.DATABASE_ID || 'career4me';
-    const TALENTS_COLLECTION_ID = req.variables?.TALENTS_COLLECTION_ID || process.env.TALENTS_COLLECTION_ID || 'talents';
-    const CAREER_PATHS_COLLECTION_ID = req.variables?.CAREER_PATHS_COLLECTION_ID || process.env.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
+    // In Appwrite Cloud Functions, use process.env directly
+    const APPWRITE_ENDPOINT = process.env.APPWRITE_ENDPOINT;
+    const APPWRITE_PROJECT_ID = process.env.APPWRITE_PROJECT_ID;
+    const APPWRITE_API_KEY = process.env.APPWRITE_API_KEY;
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+    const APPWRITE_USER_ID = process.env.APPWRITE_USER_ID;
+    const DATABASE_ID = process.env.DATABASE_ID || 'career4me';
+    const TALENTS_COLLECTION_ID = process.env.TALENTS_COLLECTION_ID || 'talents';
+    const CAREER_PATHS_COLLECTION_ID = process.env.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
+
+    // Use context.log for better logging experience
+    context.log('Environment variables loaded:', {
+      hasEndpoint: !!APPWRITE_ENDPOINT,
+      hasProjectId: !!APPWRITE_PROJECT_ID,
+      hasApiKey: !!APPWRITE_API_KEY,
+      hasGeminiKey: !!GEMINI_API_KEY,
+      hasUserId: !!APPWRITE_USER_ID
+    });
 
     // Validate required environment variables
     if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID || !APPWRITE_API_KEY || !GEMINI_API_KEY || !APPWRITE_USER_ID) {
+      context.error("Missing required environment variables", {
+        APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
+        APPWRITE_PROJECT_ID: !!APPWRITE_PROJECT_ID,
+        APPWRITE_API_KEY: !!APPWRITE_API_KEY,
+        GEMINI_API_KEY: !!GEMINI_API_KEY,
+        APPWRITE_USER_ID: !!APPWRITE_USER_ID
+      });
       throw new Error("Missing required environment variables");
     }
 
@@ -26,10 +43,12 @@ export default async function (req, res) {
 
     // Initialize Gemini AI
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // Updated to latest model
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const databases = new Databases(client);
     const userId = APPWRITE_USER_ID;
+
+    context.log('Fetching user data for userId:', userId);
 
     // Get user data
     const user = await databases.listDocuments(
@@ -39,11 +58,18 @@ export default async function (req, res) {
     );
 
     if (user.documents.length === 0) {
+      context.error("User not found for userId:", userId);
       throw new Error("User not found");
     }
 
     const userData = user.documents[0];
     const careerStage = userData.careerStage;
+
+    context.log('User data found:', {
+      careerStage,
+      hasSkills: !!userData.skills,
+      hasInterests: !!userData.interests
+    });
 
     // Get all career paths
     const careerPaths = await databases.listDocuments(
@@ -52,8 +78,11 @@ export default async function (req, res) {
     );
 
     if (careerPaths.documents.length === 0) {
+      context.error("No career paths found in database");
       throw new Error("No career paths found in database");
     }
+
+    context.log('Career paths found:', careerPaths.documents.length);
 
     // Prepare prompt based on career stage
     let prompt = `Based on the following user profile, recommend the top 3 career paths from the provided list. `;
@@ -120,10 +149,14 @@ export default async function (req, res) {
       "generalAdvice": "Overall career advice based on the user's profile"
     }`;
 
+    context.log('Calling Gemini AI...');
+
     // Get AI response
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const text = response.text();
+
+    context.log('Gemini AI response received, length:', text.length);
 
     // Parse the JSON response
     let jsonResponse;
@@ -132,7 +165,7 @@ export default async function (req, res) {
       const cleanedText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       jsonResponse = JSON.parse(cleanedText);
     } catch (e) {
-      console.error("Failed to parse AI response:", text);
+      context.error("Failed to parse AI response:", text);
       // If JSON parsing fails, try to extract JSON from text
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
@@ -148,13 +181,17 @@ export default async function (req, res) {
 
     // Validate the response structure
     if (!jsonResponse.recommendations || !Array.isArray(jsonResponse.recommendations)) {
+      context.error("Invalid response structure from AI:", jsonResponse);
       throw new Error("Invalid response structure from AI");
     }
 
     // Ensure we have exactly 3 recommendations
     if (jsonResponse.recommendations.length < 3) {
+      context.error("AI did not provide enough recommendations:", jsonResponse.recommendations.length);
       throw new Error("AI did not provide enough recommendations");
     }
+
+    context.log('Updating user testTaken status...');
 
     // Update user's testTaken status
     await databases.updateDocument(
@@ -174,11 +211,13 @@ export default async function (req, res) {
       careerStage
     };
 
+    context.log('Career match completed successfully');
+
     // Return the response using the correct Appwrite Cloud Function format
-    return res.responseData;
+    return context.res.json(responseData);
 
   } catch (error) {
-    console.error("Error in careerMatch function:", error);
+    context.error("Error in careerMatch function:", error);
     
     const errorResponse = {
       success: false,
@@ -186,6 +225,6 @@ export default async function (req, res) {
     };
     
     // Return error response using the correct Appwrite Cloud Function format
-    return errorResponse;
+    return context.res.json(errorResponse);
   }
 }
