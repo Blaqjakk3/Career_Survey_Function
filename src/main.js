@@ -169,7 +169,7 @@ export default async function (req, res) {
     };
     
     // Return error response using the correct Appwrite Cloud Function format
-    return res.send(JSON.stringify(errorResponse), 500, {
+    return res.json(JSON.stringify(errorResponse), 500, {
       'Content-Type': 'application/json'
     });
   }
