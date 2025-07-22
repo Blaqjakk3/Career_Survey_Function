@@ -12,42 +12,44 @@ export default async function (context) {
     const TALENTS_COLLECTION_ID = process.env.TALENTS_COLLECTION_ID || 'talents';
     const CAREER_PATHS_COLLECTION_ID = process.env.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
 
-    // Get user ID from the request context - this is the authenticated user
+    // Get user ID and survey answers from the request payload
     let userId = null;
+    let surveyAnswers = null;
     
-    // Try to get user ID from JWT token in headers
+    // Parse the request payload
     try {
-      if (context.req.headers['x-appwrite-user-id']) {
-        userId = context.req.headers['x-appwrite-user-id'];
-      } else if (context.req.headers['authorization']) {
-        // If we have an auth header, we can get the user from the client
-        const userClient = new Client()
-          .setEndpoint(APPWRITE_ENDPOINT)
-          .setProject(APPWRITE_PROJECT_ID);
-        
-        // Set the session from the authorization header
-        const authHeader = context.req.headers['authorization'];
-        if (authHeader.startsWith('Bearer ')) {
-          const sessionId = authHeader.substring(7);
-          userClient.setSession(sessionId);
-          
-          const { Account } = require('node-appwrite');
-          const userAccount = new Account(userClient);
-          const user = await userAccount.get();
-          userId = user.$id;
-        }
-      }
-    } catch (authError) {
-      context.log('Auth error:', authError);
+      const payload = JSON.parse(context.req.body || '{}');
+      userId = payload.userId;
+      surveyAnswers = payload.surveyAnswers;
+    } catch (e) {
+      context.error('Failed to parse request payload:', e);
     }
 
-    // If we still don't have a user ID, try to get it from the request payload
+    // Try to get user ID from JWT token in headers if not in payload
     if (!userId) {
       try {
-        const payload = JSON.parse(context.req.body || '{}');
-        userId = payload.userId;
-      } catch (e) {
-        // Ignore JSON parse errors
+        if (context.req.headers['x-appwrite-user-id']) {
+          userId = context.req.headers['x-appwrite-user-id'];
+        } else if (context.req.headers['authorization']) {
+          // If we have an auth header, we can get the user from the client
+          const userClient = new Client()
+            .setEndpoint(APPWRITE_ENDPOINT)
+            .setProject(APPWRITE_PROJECT_ID);
+          
+          // Set the session from the authorization header
+          const authHeader = context.req.headers['authorization'];
+          if (authHeader.startsWith('Bearer ')) {
+            const sessionId = authHeader.substring(7);
+            userClient.setSession(sessionId);
+            
+            const { Account } = require('node-appwrite');
+            const userAccount = new Account(userClient);
+            const user = await userAccount.get();
+            userId = user.$id;
+          }
+        }
+      } catch (authError) {
+        context.log('Auth error:', authError);
       }
     }
 
@@ -57,7 +59,8 @@ export default async function (context) {
       hasProjectId: !!APPWRITE_PROJECT_ID,
       hasApiKey: !!APPWRITE_API_KEY,
       hasGeminiKey: !!GEMINI_API_KEY,
-      userId: userId || 'not found'
+      userId: userId || 'not found',
+      hasSurveyAnswers: !!surveyAnswers
     });
 
     // Validate required environment variables
@@ -90,7 +93,7 @@ export default async function (context) {
 
     context.log('Fetching user data for userId:', userId);
 
-    // Get user data
+    // Get user data for career stage and basic info
     const user = await databases.listDocuments(
       DATABASE_ID,
       TALENTS_COLLECTION_ID,
@@ -107,8 +110,7 @@ export default async function (context) {
 
     context.log('User data found:', {
       careerStage,
-      hasSkills: !!userData.skills,
-      hasInterests: !!userData.interests
+      hasSurveyAnswers: !!surveyAnswers
     });
 
     // Get all career paths
@@ -124,33 +126,172 @@ export default async function (context) {
 
     context.log('Career paths found:', careerPaths.documents.length);
 
-    // Prepare prompt based on career stage
+    // Function to map survey answers to user profile data
+    const mapSurveyAnswersToProfile = (answers, careerStage) => {
+      const profile = {
+        careerStage,
+        education: '',
+        program: '',
+        currentSkills: [],
+        interestedSkills: [],
+        interests: [],
+        interestedFields: [],
+        workEnvironment: '',
+        currentPath: '',
+        yearsExperience: '',
+        seniorityLevel: '',
+        careerGoals: '',
+        reasonForChange: '',
+        changeUrgency: ''
+      };
+
+      // Map common fields across all career stages
+      if (answers.educationLevel) profile.education = answers.educationLevel;
+      if (answers.program) profile.program = answers.program;
+      
+      // Handle skills - convert single answers to arrays for consistency
+      if (answers.currentSkills) {
+        profile.currentSkills = Array.isArray(answers.currentSkills) 
+          ? answers.currentSkills 
+          : [answers.currentSkills];
+      }
+      if (answers.interestedSkills) {
+        profile.interestedSkills = Array.isArray(answers.interestedSkills) 
+          ? answers.interestedSkills 
+          : [answers.interestedSkills];
+      }
+      if (answers.mainInterests) {
+        profile.interests = Array.isArray(answers.mainInterests) 
+          ? answers.mainInterests 
+          : [answers.mainInterests];
+      }
+      if (answers.interestedFields) {
+        profile.interestedFields = Array.isArray(answers.interestedFields) 
+          ? answers.interestedFields 
+          : [answers.interestedFields];
+      }
+
+      // Stage-specific mappings
+      if (careerStage === 'Pathfinder') {
+        if (answers.workEnvironment) profile.workEnvironment = answers.workEnvironment;
+      } else if (careerStage === 'Trailblazer') {
+        if (answers.currentPath) profile.currentPath = answers.currentPath;
+        if (answers.yearsExperience) profile.yearsExperience = answers.yearsExperience;
+        if (answers.seniorityLevel) profile.seniorityLevel = answers.seniorityLevel;
+        if (answers.careerGoals) profile.careerGoals = answers.careerGoals;
+      } else if (careerStage === 'Horizon Changer') {
+        if (answers.currentPath) profile.currentPath = answers.currentPath;
+        if (answers.yearsExperience) profile.yearsExperience = answers.yearsExperience;
+        if (answers.seniorityLevel) profile.seniorityLevel = answers.seniorityLevel;
+        if (answers.currentWorkEnvironment) profile.currentWorkEnvironment = answers.currentWorkEnvironment;
+        if (answers.preferredWorkEnvironment) profile.preferredWorkEnvironment = answers.preferredWorkEnvironment;
+        if (answers.reasonForChange) profile.reasonForChange = answers.reasonForChange;
+        if (answers.changeUrgency) profile.changeUrgency = answers.changeUrgency;
+      }
+
+      return profile;
+    };
+
+    // Use survey answers if provided, otherwise fall back to stored user data
+    let userProfile;
+    if (surveyAnswers && Object.keys(surveyAnswers).length > 0) {
+      context.log('Using survey answers for recommendation');
+      userProfile = mapSurveyAnswersToProfile(surveyAnswers, careerStage);
+      
+      // Update the talents collection with the new survey data
+      const updateData = {};
+      
+      // Map survey answers to database fields where appropriate
+      if (surveyAnswers.educationLevel && !['High School', 'Some College'].includes(surveyAnswers.educationLevel)) {
+        if (surveyAnswers.program && !updateData.degrees) updateData.degrees = [surveyAnswers.program];
+      }
+      if (surveyAnswers.currentSkills) {
+        updateData.skills = Array.isArray(surveyAnswers.currentSkills) 
+          ? surveyAnswers.currentSkills 
+          : [surveyAnswers.currentSkills];
+      }
+      if (surveyAnswers.mainInterests) {
+        updateData.interests = Array.isArray(surveyAnswers.mainInterests) 
+          ? surveyAnswers.mainInterests 
+          : [surveyAnswers.mainInterests];
+      }
+      if (surveyAnswers.interestedFields) {
+        updateData.interestedFields = Array.isArray(surveyAnswers.interestedFields) 
+          ? surveyAnswers.interestedFields 
+          : [surveyAnswers.interestedFields];
+      }
+      if (surveyAnswers.currentPath) updateData.currentPath = surveyAnswers.currentPath;
+      if (surveyAnswers.seniorityLevel) updateData.currentSeniorityLevel = surveyAnswers.seniorityLevel;
+      
+      // Update the user document with relevant survey data
+      if (Object.keys(updateData).length > 0) {
+        try {
+          await databases.updateDocument(
+            DATABASE_ID,
+            TALENTS_COLLECTION_ID,
+            userData.$id,
+            updateData
+          );
+          context.log('Updated user profile with survey data');
+        } catch (updateError) {
+          context.log('Error updating user profile:', updateError);
+        }
+      }
+    } else {
+      context.log('Using stored user data for recommendation');
+      userProfile = {
+        careerStage,
+        education: userData.degrees?.join(', ') || 'Not specified',
+        currentSkills: userData.skills || [],
+        interests: userData.interests || [],
+        interestedFields: userData.interestedFields || [],
+        currentPath: userData.currentPath || 'Not specified',
+        seniorityLevel: userData.currentSeniorityLevel || 'Not specified'
+      };
+    }
+
+    // Prepare prompt based on career stage and user profile
     let prompt = `Based on the following user profile, recommend the top 3 career paths from the provided list. `;
     prompt += `User is a ${careerStage}.\n\n`;
 
     if (careerStage === "Pathfinder") {
       prompt += `User details:
-      - Education: ${userData.degrees?.join(', ') || 'Not specified'}
-      - Skills: ${userData.skills?.join(', ') || 'Not specified'}
-      - Interests: ${userData.interests?.join(', ') || 'Not specified'}
-      - Interested Fields: ${userData.interestedFields?.join(', ') || 'Not specified'}
+      - Education: ${userProfile.education || 'Not specified'}
+      - Program: ${userProfile.program || 'Not specified'}
+      - Current Skills: ${userProfile.currentSkills.join(', ') || 'Not specified'}
+      - Interested Skills: ${userProfile.interestedSkills.join(', ') || 'Not specified'}
+      - Interests: ${userProfile.interests.join(', ') || 'Not specified'}
+      - Interested Fields: ${userProfile.interestedFields.join(', ') || 'Not specified'}
+      - Preferred Work Environment: ${userProfile.workEnvironment || 'Not specified'}
       `;
     } else if (careerStage === "Trailblazer") {
       prompt += `User details:
-      - Current Path: ${userData.currentPath || 'Not specified'}
-      - Seniority Level: ${userData.currentSeniorityLevel || 'Not specified'}
-      - Education: ${userData.degrees?.join(', ') || 'Not specified'}
-      - Skills: ${userData.skills?.join(', ') || 'Not specified'}
-      - Interests: ${userData.interests?.join(', ') || 'Not specified'}
+      - Current Path: ${userProfile.currentPath || 'Not specified'}
+      - Years of Experience: ${userProfile.yearsExperience || 'Not specified'}
+      - Seniority Level: ${userProfile.seniorityLevel || 'Not specified'}
+      - Education: ${userProfile.education || 'Not specified'}
+      - Program: ${userProfile.program || 'Not specified'}
+      - Current Skills: ${userProfile.currentSkills.join(', ') || 'Not specified'}
+      - Interested Skills: ${userProfile.interestedSkills.join(', ') || 'Not specified'}
+      - Interests: ${userProfile.interests.join(', ') || 'Not specified'}
+      - Interested Fields: ${userProfile.interestedFields.join(', ') || 'Not specified'}
+      - Career Goals: ${userProfile.careerGoals || 'Not specified'}
       `;
     } else if (careerStage === "Horizon Changer") {
       prompt += `User details:
-      - Current Path: ${userData.currentPath || 'Not specified'}
-      - Seniority Level: ${userData.currentSeniorityLevel || 'Not specified'}
-      - Education: ${userData.degrees?.join(', ') || 'Not specified'}
-      - Skills: ${userData.skills?.join(', ') || 'Not specified'}
-      - Interests: ${userData.interests?.join(', ') || 'Not specified'}
-      - Interested Fields: ${userData.interestedFields?.join(', ') || 'Not specified'}
+      - Current Path: ${userProfile.currentPath || 'Not specified'}
+      - Years of Experience: ${userProfile.yearsExperience || 'Not specified'}
+      - Seniority Level: ${userProfile.seniorityLevel || 'Not specified'}
+      - Education: ${userProfile.education || 'Not specified'}
+      - Program: ${userProfile.program || 'Not specified'}
+      - Current Skills: ${userProfile.currentSkills.join(', ') || 'Not specified'}
+      - Interested Skills: ${userProfile.interestedSkills.join(', ') || 'Not specified'}
+      - Interests: ${userProfile.interests.join(', ') || 'Not specified'}
+      - Interested Fields: ${userProfile.interestedFields.join(', ') || 'Not specified'}
+      - Current Work Environment: ${userProfile.currentWorkEnvironment || 'Not specified'}
+      - Preferred Work Environment: ${userProfile.preferredWorkEnvironment || 'Not specified'}
+      - Reason for Change: ${userProfile.reasonForChange || 'Not specified'}
+      - Change Urgency: ${userProfile.changeUrgency || 'Not specified'}
       `;
     }
 
