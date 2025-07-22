@@ -1,7 +1,7 @@
-const { Client, Databases, Query } = require('node-appwrite');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+import { Client, Databases, Query } from 'node-appwrite';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-module.exports = async function (req, res) {
+export default async function (req, res) {
   try {
     // Initialize Appwrite client
     const client = new Client()
@@ -131,4 +131,4 @@ module.exports = async function (req, res) {
       error: error.message
     });
   }
-};
+}

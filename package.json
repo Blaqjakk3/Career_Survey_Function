@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Appwrite Function for AI-powered career path matching using Gemini AI",
   "main": "main.js",
-  "type": "module",
   "scripts": {
     "start": "node main.js",
     "test": "echo \"Error: no test specified\" && exit 1"
