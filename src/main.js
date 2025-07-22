@@ -23,9 +23,9 @@ const ARRAY_ATTRIBUTES = [
     'interestedFields', 'savedPaths', 'savedJobs'
 ];
 
-// Set execution timeout to 25 seconds to avoid 30s limit
-const EXECUTION_TIMEOUT = 25000;
-const AI_TIMEOUT = 12000; // Reduced to 12 seconds for faster AI analysis
+// Extended timeouts to better utilize Appwrite's 60-second limit
+const EXECUTION_TIMEOUT = 50000; // 50 seconds - gives buffer for response
+const AI_TIMEOUT = 35000; // 35 seconds - plenty of time for AI analysis
 
 export default async ({ req, res, log, error }) => {
     const startTime = Date.now();
@@ -71,7 +71,7 @@ export default async ({ req, res, log, error }) => {
 };
 
 async function executeCareerMatching(talentId, surveyResponses, log, error) {
-    // Fetch talent and career paths in parallel
+    // Fetch talent and career paths in parallel - no timeout for database operations
     const [talentQuery, careerPathsQuery] = await Promise.all([
         databases.listDocuments('career4me', 'talents', [Query.equal('talentId', talentId)]),
         databases.listDocuments('career4me', 'careerPaths', [Query.limit(50)])
@@ -87,7 +87,7 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
 
     const talent = talentQuery.documents[0];
 
-    // Update talent document (non-blocking)
+    // Update talent document (non-blocking) - no timeout needed
     const validUpdates = filterValidAttributes(surveyResponses);
     validUpdates.testTaken = true;
     
@@ -95,20 +95,17 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
     databases.updateDocument('career4me', 'talents', talent.$id, validUpdates)
         .catch(err => log(`Warning: Failed to update talent: ${err.message}`));
 
-    // Get current career path if available (with timeout)
+    // Get current career path if available - no timeout for database operations
     let currentCareerPath = null;
     if (surveyResponses.currentPath) {
         try {
-            currentCareerPath = await Promise.race([
-                databases.getDocument('career4me', 'careerPaths', surveyResponses.currentPath),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
-            ]);
+            currentCareerPath = await databases.getDocument('career4me', 'careerPaths', surveyResponses.currentPath);
         } catch (err) {
             log(`Warning: Could not fetch current career path: ${err.message}`);
         }
     }
 
-    // Generate matches with timeout
+    // Generate matches with extended timeout
     const matches = await generateOptimizedAIMatches(
         talent, surveyResponses, careerPathsQuery.documents, currentCareerPath, log
     );
@@ -164,13 +161,16 @@ Return this JSON:
   ]
 }`;
 
-        // AI analysis with reduced timeout and optimized thinking
+        // AI analysis with extended timeout
+        log('Starting AI analysis...');
+        const aiStartTime = Date.now();
+        
         const aiPromise = ai.models.generateContent({
             model: "gemini-2.5-flash",
             contents: analysisPrompt,
             config: {
                 thinkingConfig: {
-                    thinkingBudget: 512 // Reduced thinking budget for faster response
+                    thinkingBudget: 1024 // Increased thinking budget for better analysis
                 }
             }
         });
@@ -181,6 +181,9 @@ Return this JSON:
 
         const result = await Promise.race([aiPromise, timeoutPromise]);
         const aiResponse = result.text;
+        
+        const aiTime = Date.now() - aiStartTime;
+        log(`AI analysis completed in ${aiTime}ms`);
         
         // Clean and parse JSON response
         const cleanResponse = aiResponse.replace(/```json\n?|\n?```/g, '').trim();
@@ -214,7 +217,7 @@ Return this JSON:
             .filter(Boolean)
             .sort((a, b) => b.matchScore - a.matchScore);
 
-        log(`AI generated ${enrichedMatches.length} matches`);
+        log(`AI generated ${enrichedMatches.length} matches successfully`);
         
         // Ensure we have at least 4 matches
         if (enrichedMatches.length < 4) {
@@ -242,7 +245,7 @@ function preFilterCareerPaths(surveyResponses, careerPaths) {
     const interests = surveyResponses.interests || [];
     
     if (interestedFields.length === 0 && currentSkills.length === 0 && interests.length === 0) {
-        return careerPaths.slice(0, 25); // Reduced for faster processing
+        return careerPaths.slice(0, 30); // Increased since we have more time
     }
 
     const filtered = careerPaths.filter(path => {
@@ -275,12 +278,12 @@ function preFilterCareerPaths(surveyResponses, careerPaths) {
     });
 
     // If we filtered too aggressively, include more paths
-    if (filtered.length < 12) {
+    if (filtered.length < 15) {
         const remaining = careerPaths.filter(path => !filtered.includes(path));
-        filtered.push(...remaining.slice(0, 12 - filtered.length));
+        filtered.push(...remaining.slice(0, 15 - filtered.length));
     }
 
-    return filtered.slice(0, 25); // Limit for faster processing
+    return filtered.slice(0, 30); // Increased limit since we have more time
 }
 
 function createEnhancedPathSummary(paths) {
