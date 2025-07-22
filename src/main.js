@@ -150,10 +150,8 @@ export default async function (req, res) {
       careerStage
     };
 
-    // Return the response using res.send() instead of res.json()
-    return res.send(JSON.stringify(responseData), 200, {
-      'Content-Type': 'application/json'
-    });
+    // Return the response (Appwrite functions automatically handle JSON serialization)
+    return res.json(responseData);
 
   } catch (error) {
     console.error("Error in careerMatch function:", error);
@@ -163,9 +161,7 @@ export default async function (req, res) {
       error: error.message || "An unknown error occurred"
     };
     
-    // Return error response using res.send()
-    return res.send(JSON.stringify(errorResponse), 500, {
-      'Content-Type': 'application/json'
-    });
+    // Return error response
+    return res.json(errorResponse);
   }
 }
