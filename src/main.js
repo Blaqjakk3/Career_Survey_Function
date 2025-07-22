@@ -3,23 +3,33 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export default async function (req, res) {
   try {
+    // Access environment variables correctly for Appwrite Cloud Functions
+    const APPWRITE_ENDPOINT = req.variables?.APPWRITE_ENDPOINT || process.env.APPWRITE_ENDPOINT;
+    const APPWRITE_PROJECT_ID = req.variables?.APPWRITE_PROJECT_ID || process.env.APPWRITE_PROJECT_ID;
+    const APPWRITE_API_KEY = req.variables?.APPWRITE_API_KEY || process.env.APPWRITE_API_KEY;
+    const GEMINI_API_KEY = req.variables?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    const APPWRITE_USER_ID = req.variables?.APPWRITE_USER_ID || process.env.APPWRITE_USER_ID;
+    const DATABASE_ID = req.variables?.DATABASE_ID || process.env.DATABASE_ID || 'career4me';
+    const TALENTS_COLLECTION_ID = req.variables?.TALENTS_COLLECTION_ID || process.env.TALENTS_COLLECTION_ID || 'talents';
+    const CAREER_PATHS_COLLECTION_ID = req.variables?.CAREER_PATHS_COLLECTION_ID || process.env.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
+
+    // Validate required environment variables
+    if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID || !APPWRITE_API_KEY || !GEMINI_API_KEY || !APPWRITE_USER_ID) {
+      throw new Error("Missing required environment variables");
+    }
+
     // Initialize Appwrite client
     const client = new Client()
-      .setEndpoint(req.variables.APPWRITE_ENDPOINT )
-      .setProject(req.variables.APPWRITE_PROJECT_ID )
-      .setKey(req.variables.APPWRITE_API_KEY);
+      .setEndpoint(APPWRITE_ENDPOINT)
+      .setProject(APPWRITE_PROJECT_ID)
+      .setKey(APPWRITE_API_KEY);
 
     // Initialize Gemini AI
-    const genAI = new GoogleGenerativeAI(req.variables.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // Updated to latest model
 
     const databases = new Databases(client);
-    const userId = req.variables.APPWRITE_USER_ID;
-
-    // Define database and collection IDs from appwrite.ts config
-    const DATABASE_ID = req.variables.DATABASE_ID || 'career4me';
-    const TALENTS_COLLECTION_ID = req.variables.TALENTS_COLLECTION_ID || 'talents';
-    const CAREER_PATHS_COLLECTION_ID = req.variables.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
+    const userId = APPWRITE_USER_ID;
 
     // Get user data
     const user = await databases.listDocuments(
@@ -40,6 +50,10 @@ export default async function (req, res) {
       DATABASE_ID,
       CAREER_PATHS_COLLECTION_ID
     );
+
+    if (careerPaths.documents.length === 0) {
+      throw new Error("No career paths found in database");
+    }
 
     // Prepare prompt based on career stage
     let prompt = `Based on the following user profile, recommend the top 3 career paths from the provided list. `;
@@ -137,6 +151,11 @@ export default async function (req, res) {
       throw new Error("Invalid response structure from AI");
     }
 
+    // Ensure we have exactly 3 recommendations
+    if (jsonResponse.recommendations.length < 3) {
+      throw new Error("AI did not provide enough recommendations");
+    }
+
     // Update user's testTaken status
     await databases.updateDocument(
       DATABASE_ID,
@@ -150,15 +169,13 @@ export default async function (req, res) {
     // Prepare the response data
     const responseData = {
       success: true,
-      recommendations: jsonResponse.recommendations,
+      recommendations: jsonResponse.recommendations.slice(0, 3), // Ensure only top 3
       generalAdvice: jsonResponse.generalAdvice || "Continue developing your skills and exploring opportunities in your areas of interest.",
       careerStage
     };
 
     // Return the response using the correct Appwrite Cloud Function format
-    return res.send(JSON.stringify(responseData), 200, {
-      'Content-Type': 'application/json'
-    });
+    return res.json(responseData);
 
   } catch (error) {
     console.error("Error in careerMatch function:", error);
@@ -169,10 +186,6 @@ export default async function (req, res) {
     };
     
     // Return error response using the correct Appwrite Cloud Function format
-    return {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(errorResponse)
-    }
+    return res.json(errorResponse, 500);
   }
 }
