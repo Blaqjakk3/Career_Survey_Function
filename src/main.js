@@ -4,15 +4,52 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 export default async function (context) {
   try {
     // Access environment variables correctly for Appwrite Cloud Functions
-    // In Appwrite Cloud Functions, use process.env directly
     const APPWRITE_ENDPOINT = process.env.APPWRITE_ENDPOINT;
     const APPWRITE_PROJECT_ID = process.env.APPWRITE_PROJECT_ID;
     const APPWRITE_API_KEY = process.env.APPWRITE_API_KEY;
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-    const APPWRITE_USER_ID = process.env.APPWRITE_USER_ID;
     const DATABASE_ID = process.env.DATABASE_ID || 'career4me';
     const TALENTS_COLLECTION_ID = process.env.TALENTS_COLLECTION_ID || 'talents';
     const CAREER_PATHS_COLLECTION_ID = process.env.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
+
+    // Get user ID from the request context - this is the authenticated user
+    let userId = null;
+    
+    // Try to get user ID from JWT token in headers
+    try {
+      if (context.req.headers['x-appwrite-user-id']) {
+        userId = context.req.headers['x-appwrite-user-id'];
+      } else if (context.req.headers['authorization']) {
+        // If we have an auth header, we can get the user from the client
+        const userClient = new Client()
+          .setEndpoint(APPWRITE_ENDPOINT)
+          .setProject(APPWRITE_PROJECT_ID);
+        
+        // Set the session from the authorization header
+        const authHeader = context.req.headers['authorization'];
+        if (authHeader.startsWith('Bearer ')) {
+          const sessionId = authHeader.substring(7);
+          userClient.setSession(sessionId);
+          
+          const { Account } = require('node-appwrite');
+          const userAccount = new Account(userClient);
+          const user = await userAccount.get();
+          userId = user.$id;
+        }
+      }
+    } catch (authError) {
+      context.log('Auth error:', authError);
+    }
+
+    // If we still don't have a user ID, try to get it from the request payload
+    if (!userId) {
+      try {
+        const payload = JSON.parse(context.req.body || '{}');
+        userId = payload.userId;
+      } catch (e) {
+        // Ignore JSON parse errors
+      }
+    }
 
     // Use context.log for better logging experience
     context.log('Environment variables loaded:', {
@@ -20,19 +57,23 @@ export default async function (context) {
       hasProjectId: !!APPWRITE_PROJECT_ID,
       hasApiKey: !!APPWRITE_API_KEY,
       hasGeminiKey: !!GEMINI_API_KEY,
-      hasUserId: !!APPWRITE_USER_ID
+      userId: userId || 'not found'
     });
 
     // Validate required environment variables
-    if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID || !APPWRITE_API_KEY || !GEMINI_API_KEY || !APPWRITE_USER_ID) {
+    if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID || !APPWRITE_API_KEY || !GEMINI_API_KEY) {
       context.error("Missing required environment variables", {
         APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
         APPWRITE_PROJECT_ID: !!APPWRITE_PROJECT_ID,
         APPWRITE_API_KEY: !!APPWRITE_API_KEY,
-        GEMINI_API_KEY: !!GEMINI_API_KEY,
-        APPWRITE_USER_ID: !!APPWRITE_USER_ID
+        GEMINI_API_KEY: !!GEMINI_API_KEY
       });
       throw new Error("Missing required environment variables");
+    }
+
+    if (!userId) {
+      context.error("No user ID found in request context or payload");
+      throw new Error("User authentication required");
     }
 
     // Initialize Appwrite client
@@ -46,7 +87,6 @@ export default async function (context) {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const databases = new Databases(client);
-    const userId = APPWRITE_USER_ID;
 
     context.log('Fetching user data for userId:', userId);
 
