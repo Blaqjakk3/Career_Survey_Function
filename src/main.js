@@ -128,7 +128,7 @@ async function generateOptimizedAIMatches(talent, surveyResponses, careerPaths, 
         log(`Pre-filtered to ${relevantPaths.length} relevant paths from ${careerPaths.length} total`);
 
         const model = genAI.getGenerativeModel({ 
-            model: 'gemini-2.0-flash-exp', // Faster model
+            model: 'gemini-2.5-flash', // Faster model
             generationConfig: {
                 maxOutputTokens: 3072, // Increased for more matches
                 temperature: 0.4, // Slightly more creative for diverse matches
