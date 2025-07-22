@@ -23,9 +23,9 @@ const ARRAY_ATTRIBUTES = [
     'interestedFields', 'savedPaths', 'savedJobs'
 ];
 
-// Extended timeouts to better utilize Appwrite's 60-second limit
-const EXECUTION_TIMEOUT = 50000; // 50 seconds - gives buffer for response
-const AI_TIMEOUT = 35000; // 35 seconds - plenty of time for AI analysis
+// Use full 60-second timeout since we're forcing async execution
+const EXECUTION_TIMEOUT = 58000; // 58 seconds - small buffer
+const AI_TIMEOUT = 45000; // 45 seconds for AI analysis
 
 export default async ({ req, res, log, error }) => {
     const startTime = Date.now();
@@ -42,15 +42,25 @@ export default async ({ req, res, log, error }) => {
             }, 400);
         }
 
-        // Set up timeout for entire execution
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Function execution timeout')), EXECUTION_TIMEOUT);
+        // FORCE ASYNCHRONOUS EXECUTION by using setTimeout
+        // This prevents the 30-second synchronous timeout
+        const result = await new Promise((resolve, reject) => {
+            // Use setTimeout to force async execution immediately
+            setTimeout(async () => {
+                try {
+                    const executionPromise = executeCareerMatching(talentId, surveyResponses, log, error);
+                    
+                    const timeoutPromise = new Promise((_, timeoutReject) => {
+                        setTimeout(() => timeoutReject(new Error('Function execution timeout')), EXECUTION_TIMEOUT);
+                    });
+                    
+                    const matchingResult = await Promise.race([executionPromise, timeoutPromise]);
+                    resolve(matchingResult);
+                } catch (err) {
+                    reject(err);
+                }
+            }, 0); // Execute immediately but asynchronously
         });
-
-        const executionPromise = executeCareerMatching(talentId, surveyResponses, log, error);
-        
-        // Race between execution and timeout
-        const result = await Promise.race([executionPromise, timeoutPromise]);
         
         const executionTime = Date.now() - startTime;
         log(`Total execution time: ${executionTime}ms`);
@@ -71,7 +81,7 @@ export default async ({ req, res, log, error }) => {
 };
 
 async function executeCareerMatching(talentId, surveyResponses, log, error) {
-    // Fetch talent and career paths in parallel - no timeout for database operations
+    // Fetch talent and career paths in parallel
     const [talentQuery, careerPathsQuery] = await Promise.all([
         databases.listDocuments('career4me', 'talents', [Query.equal('talentId', talentId)]),
         databases.listDocuments('career4me', 'careerPaths', [Query.limit(50)])
@@ -87,7 +97,7 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
 
     const talent = talentQuery.documents[0];
 
-    // Update talent document (non-blocking) - no timeout needed
+    // Update talent document (non-blocking)
     const validUpdates = filterValidAttributes(surveyResponses);
     validUpdates.testTaken = true;
     
@@ -95,7 +105,7 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
     databases.updateDocument('career4me', 'talents', talent.$id, validUpdates)
         .catch(err => log(`Warning: Failed to update talent: ${err.message}`));
 
-    // Get current career path if available - no timeout for database operations
+    // Get current career path if available
     let currentCareerPath = null;
     if (surveyResponses.currentPath) {
         try {
@@ -105,7 +115,7 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
         }
     }
 
-    // Generate matches with extended timeout
+    // Generate matches
     const matches = await generateOptimizedAIMatches(
         talent, surveyResponses, careerPathsQuery.documents, currentCareerPath, log
     );
@@ -245,7 +255,7 @@ function preFilterCareerPaths(surveyResponses, careerPaths) {
     const interests = surveyResponses.interests || [];
     
     if (interestedFields.length === 0 && currentSkills.length === 0 && interests.length === 0) {
-        return careerPaths.slice(0, 30); // Increased since we have more time
+        return careerPaths.slice(0, 35); // Increased since we have more time
     }
 
     const filtered = careerPaths.filter(path => {
@@ -278,12 +288,12 @@ function preFilterCareerPaths(surveyResponses, careerPaths) {
     });
 
     // If we filtered too aggressively, include more paths
-    if (filtered.length < 15) {
+    if (filtered.length < 20) {
         const remaining = careerPaths.filter(path => !filtered.includes(path));
-        filtered.push(...remaining.slice(0, 15 - filtered.length));
+        filtered.push(...remaining.slice(0, 20 - filtered.length));
     }
 
-    return filtered.slice(0, 30); // Increased limit since we have more time
+    return filtered.slice(0, 35); // Increased limit since we have more time
 }
 
 function createEnhancedPathSummary(paths) {
