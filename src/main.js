@@ -11,7 +11,7 @@ module.exports = async function (req, res) {
 
     // Initialize Gemini AI
     const genAI = new GoogleGenerativeAI(req.variables.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const databases = new Databases(client);
     const userId = req.variables.APPWRITE_USER_ID;
