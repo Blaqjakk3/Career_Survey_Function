@@ -2,6 +2,15 @@ import { Client, Databases, Query } from 'node-appwrite';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export default async function (req, res) {
+  // Add error handling for missing res object
+  if (!res || typeof res.json !== 'function') {
+    console.error('Response object is not properly initialized');
+    return {
+      success: false,
+      error: 'Server configuration error'
+    };
+  }
+
   try {
     // Initialize Appwrite client
     const client = new Client()
@@ -118,17 +127,22 @@ export default async function (req, res) {
     );
 
     // Return the recommendations
-    res.json({
+    const responseData = {
       success: true,
       recommendations: jsonResponse.recommendations,
       generalAdvice: jsonResponse.generalAdvice,
       careerStage
-    });
+    };
+
+    return res.json(responseData);
+
   } catch (error) {
     console.error("Error in careerMatch function:", error);
-    res.json({
+    const errorResponse = {
       success: false,
       error: error.message
-    });
+    };
+    
+    return res.json(errorResponse);
   }
 }
