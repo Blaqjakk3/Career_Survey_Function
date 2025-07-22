@@ -23,17 +23,35 @@ const ARRAY_ATTRIBUTES = [
     'interestedFields', 'savedPaths', 'savedJobs'
 ];
 
-// Use full 60-second timeout since we're forcing async execution
+// Use full 60-second timeout for async execution
 const EXECUTION_TIMEOUT = 58000; // 58 seconds - small buffer
-const AI_TIMEOUT = 45000; // 45 seconds for AI analysis
+const AI_TIMEOUT = 50000; // 50 seconds for AI analysis
 
+// Main function - immediately returns a promise for async execution
 export default async ({ req, res, log, error }) => {
+    // Return early with async execution promise
+    return executeAsyncCareerMatching(req, res, log, error);
+};
+
+// Separate async execution function
+async function executeAsyncCareerMatching(req, res, log, error) {
     const startTime = Date.now();
     
     try {
-        log('Starting optimized AI career matching...');
+        log('Starting fully async AI career matching...');
         
-        const { talentId, surveyResponses } = JSON.parse(req.body);
+        // Parse request body
+        let talentId, surveyResponses;
+        try {
+            const body = JSON.parse(req.body);
+            talentId = body.talentId;
+            surveyResponses = body.surveyResponses;
+        } catch (parseError) {
+            return res.json({ 
+                success: false, 
+                error: 'Invalid JSON in request body' 
+            }, 400);
+        }
 
         if (!talentId || !surveyResponses) {
             return res.json({ 
@@ -42,34 +60,26 @@ export default async ({ req, res, log, error }) => {
             }, 400);
         }
 
-        // FORCE ASYNCHRONOUS EXECUTION by using setTimeout
-        // This prevents the 30-second synchronous timeout
-        const result = await new Promise((resolve, reject) => {
-            // Use setTimeout to force async execution immediately
-            setTimeout(async () => {
-                try {
-                    const executionPromise = executeCareerMatching(talentId, surveyResponses, log, error);
-                    
-                    const timeoutPromise = new Promise((_, timeoutReject) => {
-                        setTimeout(() => timeoutReject(new Error('Function execution timeout')), EXECUTION_TIMEOUT);
-                    });
-                    
-                    const matchingResult = await Promise.race([executionPromise, timeoutPromise]);
-                    resolve(matchingResult);
-                } catch (err) {
-                    reject(err);
-                }
-            }, 0); // Execute immediately but asynchronously
+        // Execute the career matching with timeout protection
+        const executionPromise = performCareerMatching(talentId, surveyResponses, log, error);
+        
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Function execution timeout after 58 seconds')), EXECUTION_TIMEOUT);
         });
+        
+        const result = await Promise.race([executionPromise, timeoutPromise]);
         
         const executionTime = Date.now() - startTime;
         log(`Total execution time: ${executionTime}ms`);
         
-        return res.json(result);
+        return res.json({
+            ...result,
+            executionTime: executionTime
+        });
 
     } catch (err) {
         const executionTime = Date.now() - startTime;
-        error(`Career matching failed after ${executionTime}ms:`, err);
+        error(`Career matching failed after ${executionTime}ms:`, err.message);
         
         return res.json({ 
             success: false, 
@@ -78,10 +88,13 @@ export default async ({ req, res, log, error }) => {
             details: process.env.NODE_ENV === 'development' ? err.stack : undefined
         }, 500);
     }
-};
+}
 
-async function executeCareerMatching(talentId, surveyResponses, log, error) {
-    // Fetch talent and career paths in parallel
+async function performCareerMatching(talentId, surveyResponses, log, error) {
+    const stepStartTime = Date.now();
+    
+    // Step 1: Fetch talent and career paths in parallel
+    log('Fetching talent and career paths...');
     const [talentQuery, careerPathsQuery] = await Promise.all([
         databases.listDocuments('career4me', 'talents', [Query.equal('talentId', talentId)]),
         databases.listDocuments('career4me', 'careerPaths', [Query.limit(50)])
@@ -96,29 +109,35 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
     }
 
     const talent = talentQuery.documents[0];
+    log(`Data fetched in ${Date.now() - stepStartTime}ms`);
 
-    // Update talent document (non-blocking)
+    // Step 2: Update talent document (fire and forget - don't await)
     const validUpdates = filterValidAttributes(surveyResponses);
     validUpdates.testTaken = true;
     
-    // Don't await this - let it run in background
+    // Fire and forget - let it run in background
     databases.updateDocument('career4me', 'talents', talent.$id, validUpdates)
+        .then(() => log('Talent document updated successfully'))
         .catch(err => log(`Warning: Failed to update talent: ${err.message}`));
 
-    // Get current career path if available
+    // Step 3: Get current career path if available (don't block on failures)
     let currentCareerPath = null;
     if (surveyResponses.currentPath) {
         try {
+            const pathStartTime = Date.now();
             currentCareerPath = await databases.getDocument('career4me', 'careerPaths', surveyResponses.currentPath);
+            log(`Current path fetched in ${Date.now() - pathStartTime}ms`);
         } catch (err) {
             log(`Warning: Could not fetch current career path: ${err.message}`);
         }
     }
 
-    // Generate matches
+    // Step 4: Generate matches
+    const matchingStartTime = Date.now();
     const matches = await generateOptimizedAIMatches(
         talent, surveyResponses, careerPathsQuery.documents, currentCareerPath, log
     );
+    log(`Matching completed in ${Date.now() - matchingStartTime}ms`);
 
     return {
         success: true,
@@ -131,11 +150,15 @@ async function executeCareerMatching(talentId, surveyResponses, log, error) {
 async function generateOptimizedAIMatches(talent, surveyResponses, careerPaths, currentCareerPath, log) {
     try {
         // Pre-filter career paths to reduce AI processing load
+        const filterStartTime = Date.now();
         const relevantPaths = preFilterCareerPaths(surveyResponses, careerPaths);
-        log(`Pre-filtered to ${relevantPaths.length} relevant paths from ${careerPaths.length} total`);
+        log(`Pre-filtered to ${relevantPaths.length} relevant paths from ${careerPaths.length} total in ${Date.now() - filterStartTime}ms`);
 
+        // Build context efficiently
+        const contextStartTime = Date.now();
         const contextPrompt = buildOptimizedContextPrompt(talent, surveyResponses, currentCareerPath);
         const careerPathsSummary = createEnhancedPathSummary(relevantPaths);
+        log(`Context built in ${Date.now() - contextStartTime}ms`);
 
         const analysisPrompt = `${contextPrompt}
 
@@ -171,7 +194,7 @@ Return this JSON:
   ]
 }`;
 
-        // AI analysis with extended timeout
+        // AI analysis with timeout protection
         log('Starting AI analysis...');
         const aiStartTime = Date.now();
         
@@ -180,22 +203,22 @@ Return this JSON:
             contents: analysisPrompt,
             config: {
                 thinkingConfig: {
-                    thinkingBudget: 1024 // Increased thinking budget for better analysis
+                    thinkingBudget: 1024
                 }
             }
-        });
+        }).then(result => result.text);
         
-        const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('AI timeout')), AI_TIMEOUT)
+        const aiTimeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('AI analysis timeout after 50 seconds')), AI_TIMEOUT)
         );
 
-        const result = await Promise.race([aiPromise, timeoutPromise]);
-        const aiResponse = result.text;
+        const aiResponse = await Promise.race([aiPromise, aiTimeoutPromise]);
         
         const aiTime = Date.now() - aiStartTime;
         log(`AI analysis completed in ${aiTime}ms`);
         
-        // Clean and parse JSON response
+        // Parse and process AI response
+        const parseStartTime = Date.now();
         const cleanResponse = aiResponse.replace(/```json\n?|\n?```/g, '').trim();
         const jsonMatch = cleanResponse.match(/\{[\s\S]*\}/);
         
@@ -227,6 +250,7 @@ Return this JSON:
             .filter(Boolean)
             .sort((a, b) => b.matchScore - a.matchScore);
 
+        log(`Response parsed and enriched in ${Date.now() - parseStartTime}ms`);
         log(`AI generated ${enrichedMatches.length} matches successfully`);
         
         // Ensure we have at least 4 matches
@@ -255,7 +279,7 @@ function preFilterCareerPaths(surveyResponses, careerPaths) {
     const interests = surveyResponses.interests || [];
     
     if (interestedFields.length === 0 && currentSkills.length === 0 && interests.length === 0) {
-        return careerPaths.slice(0, 35); // Increased since we have more time
+        return careerPaths.slice(0, 35); // Return first 35 if no filters
     }
 
     const filtered = careerPaths.filter(path => {
@@ -293,7 +317,7 @@ function preFilterCareerPaths(surveyResponses, careerPaths) {
         filtered.push(...remaining.slice(0, 20 - filtered.length));
     }
 
-    return filtered.slice(0, 35); // Increased limit since we have more time
+    return filtered.slice(0, 35); // Return top 35 filtered paths
 }
 
 function createEnhancedPathSummary(paths) {
