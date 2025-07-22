@@ -2,15 +2,6 @@ import { Client, Databases, Query } from 'node-appwrite';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export default async function (req, res) {
-  // Add error handling for missing res object
-  if (!res || typeof res.json !== 'function') {
-    console.error('Response object is not properly initialized');
-    return {
-      success: false,
-      error: 'Server configuration error'
-    };
-  }
-
   try {
     // Initialize Appwrite client
     const client = new Client()
@@ -92,7 +83,20 @@ export default async function (req, res) {
           "reason": "Detailed explanation why this is a good match",
           "improvementAreas": ["skill1", "skill2"]
         },
-        ...
+        {
+          "pathId": "career_path_id_2",
+          "title": "Career Path Title 2",
+          "matchScore": 80,
+          "reason": "Detailed explanation why this is a good match",
+          "improvementAreas": ["skill1", "skill2"]
+        },
+        {
+          "pathId": "career_path_id_3",
+          "title": "Career Path Title 3",
+          "matchScore": 75,
+          "reason": "Detailed explanation why this is a good match",
+          "improvementAreas": ["skill1", "skill2"]
+        }
       ],
       "generalAdvice": "Overall career advice based on the user's profile"
     }`;
@@ -105,15 +109,27 @@ export default async function (req, res) {
     // Parse the JSON response
     let jsonResponse;
     try {
-      jsonResponse = JSON.parse(text);
+      // Clean the response text to remove any markdown formatting
+      const cleanedText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      jsonResponse = JSON.parse(cleanedText);
     } catch (e) {
+      console.error("Failed to parse AI response:", text);
       // If JSON parsing fails, try to extract JSON from text
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        jsonResponse = JSON.parse(jsonMatch[0]);
+        try {
+          jsonResponse = JSON.parse(jsonMatch[0]);
+        } catch (e2) {
+          throw new Error("Failed to parse AI response as JSON");
+        }
       } else {
-        throw new Error("Failed to parse AI response");
+        throw new Error("No valid JSON found in AI response");
       }
+    }
+
+    // Validate the response structure
+    if (!jsonResponse.recommendations || !Array.isArray(jsonResponse.recommendations)) {
+      throw new Error("Invalid response structure from AI");
     }
 
     // Update user's testTaken status
@@ -126,23 +142,26 @@ export default async function (req, res) {
       }
     );
 
-    // Return the recommendations
+    // Prepare the response data
     const responseData = {
       success: true,
       recommendations: jsonResponse.recommendations,
-      generalAdvice: jsonResponse.generalAdvice,
+      generalAdvice: jsonResponse.generalAdvice || "Continue developing your skills and exploring opportunities in your areas of interest.",
       careerStage
     };
 
+    // Return the response (Appwrite functions automatically handle JSON serialization)
     return res.json(responseData);
 
   } catch (error) {
     console.error("Error in careerMatch function:", error);
+    
     const errorResponse = {
       success: false,
-      error: error.message
+      error: error.message || "An unknown error occurred"
     };
     
+    // Return error response
     return res.json(errorResponse);
   }
 }
