@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "node-appwrite": "^13.0.0",
-    "@google/generative-ai": "^0.17.1"
+    "@google/genai": "^0.7.0"
   },
   "keywords": [
     "appwrite",
