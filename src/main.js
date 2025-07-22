@@ -23,42 +23,62 @@ const ARRAY_ATTRIBUTES = [
     'interestedFields', 'savedPaths', 'savedJobs'
 ];
 
-// CRITICAL: Enable asynchronous execution by returning immediately
+// FIXED: Proper async function with return statement
 export default async ({ req, res, log, error }) => {
-    // Immediately return response to enable async execution
-    res.json({ 
-        success: true, 
-        message: 'Career matching started. Processing asynchronously...',
-        async: true 
-    });
+    try {
+        log('Starting AI career matching function...');
+        
+        // Parse request body
+        let talentId, surveyResponses;
+        try {
+            const body = JSON.parse(req.body || '{}');
+            talentId = body.talentId;
+            surveyResponses = body.surveyResponses;
+        } catch (parseError) {
+            error('Invalid JSON in request body:', parseError.message);
+            return res.json({ 
+                success: false, 
+                error: 'Invalid JSON in request body',
+                async: false 
+            });
+        }
 
-    // Continue processing asynchronously
-    processCareerMatchingAsync(req, log, error);
+        if (!talentId || !surveyResponses) {
+            error('Missing required parameters: talentId and surveyResponses');
+            return res.json({ 
+                success: false, 
+                error: 'Missing required parameters: talentId and surveyResponses',
+                async: false 
+            });
+        }
+
+        // Start async processing but don't wait for it
+        processCareerMatchingAsync(talentId, surveyResponses, log, error);
+        
+        // Return immediately to client
+        return res.json({ 
+            success: true, 
+            message: 'Career matching started. Processing asynchronously...',
+            async: true 
+        });
+
+    } catch (err) {
+        error('Function initialization error:', err.message);
+        return res.json({ 
+            success: false, 
+            error: err.message,
+            async: false 
+        });
+    }
 };
 
-// Separate async processing function that doesn't block the response
-async function processCareerMatchingAsync(req, log, error) {
+// Separate async processing function that runs in background
+async function processCareerMatchingAsync(talentId, surveyResponses, log, error) {
     const startTime = Date.now();
     
     try {
         log('Starting async AI career matching...');
         
-        // Parse request body
-        let talentId, surveyResponses;
-        try {
-            const body = JSON.parse(req.body);
-            talentId = body.talentId;
-            surveyResponses = body.surveyResponses;
-        } catch (parseError) {
-            error('Invalid JSON in request body:', parseError.message);
-            return;
-        }
-
-        if (!talentId || !surveyResponses) {
-            error('Missing required parameters: talentId and surveyResponses');
-            return;
-        }
-
         // Execute career matching with optimized flow
         const result = await performOptimizedCareerMatching(talentId, surveyResponses, log, error);
         
@@ -72,6 +92,16 @@ async function processCareerMatchingAsync(req, log, error) {
     } catch (err) {
         const executionTime = Date.now() - startTime;
         error(`Career matching failed after ${executionTime}ms:`, err.message);
+        
+        // Store error state for client to detect
+        try {
+            await databases.updateDocument('career4me', 'talents', talentId, {
+                lastCareerMatches: JSON.stringify({ error: err.message }),
+                lastMatchTimestamp: new Date().toISOString()
+            });
+        } catch (storeError) {
+            error('Failed to store error state:', storeError.message);
+        }
     }
 }
 
@@ -329,14 +359,28 @@ function generateQuickFallback(surveyResponses, careerPaths, talent) {
 
 async function storeMatchResults(talentId, result, log) {
     try {
+        // Find the talent document first
+        const talentQuery = await databases.listDocuments('career4me', 'talents', [
+            Query.equal('talentId', talentId),
+            Query.limit(1)
+        ]);
+        
+        if (talentQuery.documents.length === 0) {
+            throw new Error('Talent not found for storing results');
+        }
+        
+        const talent = talentQuery.documents[0];
+        
         // Store results in talent document for client retrieval
-        await databases.updateDocument('career4me', 'talents', talentId, {
+        await databases.updateDocument('career4me', 'talents', talent.$id, {
             lastCareerMatches: JSON.stringify(result.matches),
             lastMatchTimestamp: new Date().toISOString()
         });
+        
         log('Match results stored successfully');
     } catch (err) {
         log(`Warning: Failed to store results: ${err.message}`);
+        throw err; // Re-throw so the error can be handled upstream
     }
 }
 
