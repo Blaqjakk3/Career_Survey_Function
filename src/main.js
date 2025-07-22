@@ -175,7 +175,7 @@ export default async function (req, res) {
     };
 
     // Return the response using the correct Appwrite Cloud Function format
-    return res.json(responseData);
+    return res.responseData;
 
   } catch (error) {
     console.error("Error in careerMatch function:", error);
@@ -186,6 +186,6 @@ export default async function (req, res) {
     };
     
     // Return error response using the correct Appwrite Cloud Function format
-    return res.json(errorResponse, 500);
+    return errorResponse;
   }
 }
