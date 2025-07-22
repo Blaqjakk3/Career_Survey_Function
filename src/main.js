@@ -5,8 +5,8 @@ export default async function (req, res) {
   try {
     // Initialize Appwrite client
     const client = new Client()
-      .setEndpoint(req.variables.APPWRITE_ENDPOINT)
-      .setProject(req.variables.APPWRITE_PROJECT_ID)
+      .setEndpoint(req.variables.APPWRITE_ENDPOINT )
+      .setProject(req.variables.APPWRITE_PROJECT_ID )
       .setKey(req.variables.APPWRITE_API_KEY);
 
     // Initialize Gemini AI
@@ -16,10 +16,15 @@ export default async function (req, res) {
     const databases = new Databases(client);
     const userId = req.variables.APPWRITE_USER_ID;
 
+    // Define database and collection IDs from appwrite.ts config
+    const DATABASE_ID = req.variables.DATABASE_ID || 'career4me';
+    const TALENTS_COLLECTION_ID = req.variables.TALENTS_COLLECTION_ID || 'talents';
+    const CAREER_PATHS_COLLECTION_ID = req.variables.CAREER_PATHS_COLLECTION_ID || 'careerPaths';
+
     // Get user data
     const user = await databases.listDocuments(
-      req.variables.DATABASE_ID,
-      req.variables.TALENTS_COLLECTION_ID,
+      DATABASE_ID,
+      TALENTS_COLLECTION_ID,
       [Query.equal("talentId", userId)]
     );
 
@@ -32,8 +37,8 @@ export default async function (req, res) {
 
     // Get all career paths
     const careerPaths = await databases.listDocuments(
-      req.variables.DATABASE_ID,
-      req.variables.CAREER_PATHS_COLLECTION_ID
+      DATABASE_ID,
+      CAREER_PATHS_COLLECTION_ID
     );
 
     // Prepare prompt based on career stage
@@ -134,8 +139,8 @@ export default async function (req, res) {
 
     // Update user's testTaken status
     await databases.updateDocument(
-      req.variables.DATABASE_ID,
-      req.variables.TALENTS_COLLECTION_ID,
+      DATABASE_ID,
+      TALENTS_COLLECTION_ID,
       userData.$id,
       {
         testTaken: true
@@ -150,8 +155,10 @@ export default async function (req, res) {
       careerStage
     };
 
-    // Return the response (Appwrite functions automatically handle JSON serialization)
-    return res.json(responseData);
+    // Return the response using the correct Appwrite Cloud Function format
+    return res.send(JSON.stringify(responseData), 200, {
+      'Content-Type': 'application/json'
+    });
 
   } catch (error) {
     console.error("Error in careerMatch function:", error);
@@ -161,7 +168,9 @@ export default async function (req, res) {
       error: error.message || "An unknown error occurred"
     };
     
-    // Return error response
-    return res.json(errorResponse);
+    // Return error response using the correct Appwrite Cloud Function format
+    return res.send(JSON.stringify(errorResponse), 500, {
+      'Content-Type': 'application/json'
+    });
   }
 }
