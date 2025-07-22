@@ -130,34 +130,50 @@ async function generateOptimizedAIMatches(talent, surveyResponses, careerPaths, 
         const model = genAI.getGenerativeModel({ 
             model: 'gemini-2.0-flash-exp', // Faster model
             generationConfig: {
-                maxOutputTokens: 2048, // Limit response size
-                temperature: 0.3, // More focused responses
+                maxOutputTokens: 3072, // Increased for more matches
+                temperature: 0.4, // Slightly more creative for diverse matches
             }
         });
 
         const contextPrompt = buildOptimizedContextPrompt(talent, surveyResponses, currentCareerPath);
-        const careerPathsSummary = createConcisePathSummary(relevantPaths);
+        const careerPathsSummary = createEnhancedPathSummary(relevantPaths);
 
         const analysisPrompt = `${contextPrompt}
 
-CAREER PATHS (${relevantPaths.length}):
+CAREER PATHS AVAILABLE (${relevantPaths.length}):
 ${careerPathsSummary}
 
-Analyze and return TOP 3 matches as JSON:
+TASK: Analyze and rank ALL suitable career paths. Return your TOP 8 BEST MATCHES as JSON.
+
+SCORING CRITERIA:
+- Skills Alignment (35%): Current skills + learning interest + transferable skills
+- Interest Match (25%): Personal interests + field preferences
+- Education Fit (20%): Educational background relevance
+- Career Stage Fit (10%): Appropriate for ${talent.careerStage} level
+- Growth Potential (10%): Future opportunities and development path
+
+MATCHING RULES:
+1. Score each path 0-100 based on above criteria
+2. Include mix of: perfect fits (90-100%), strong matches (75-89%), growth opportunities (60-74%)
+3. Prioritize paths that match skills AND interests
+4. Consider transferable skills and learning willingness
+5. For career changers: weight interests higher than current skills
+
+Return EXACTLY this JSON structure:
 {
   "matches": [
     {
-      "careerPathId": "id",
-      "matchScore": 85,
-      "reasoning": "Brief 1-sentence match explanation",
-      "strengths": ["strength1", "strength2"],
-      "developmentAreas": ["area1", "area2"],
-      "recommendations": ["rec1", "rec2", "rec3"]
+      "careerPathId": "path_id_here",
+      "matchScore": 92,
+      "reasoning": "Concise explanation of why this is a strong match focusing on top 2-3 alignment factors",
+      "strengths": ["2-3 specific strengths that make this person suitable"],
+      "developmentAreas": ["2-3 key areas to focus development on"],
+      "recommendations": ["3-4 specific actionable steps to pursue this path"]
     }
   ]
 }
 
-Match based on: skills (40%), interests (30%), education (20%), fit (10%).`;
+Ensure diversity in match types and industries. Include at least one stretch/growth opportunity match.`;
 
         // AI analysis with timeout
         const aiPromise = model.generateContent(analysisPrompt);
@@ -175,86 +191,230 @@ Match based on: skills (40%), interests (30%), education (20%), fit (10%).`;
         
         const analysisResult = JSON.parse(jsonMatch[0]);
         
-        // Enrich with full career path data
-        const enrichedMatches = analysisResult.matches.map(match => {
-            const careerPath = careerPaths.find(path => path.$id === match.careerPathId);
-            return careerPath ? {
-                careerPath,
-                matchScore: match.matchScore,
-                reasoning: match.reasoning,
-                strengths: match.strengths,
-                developmentAreas: match.developmentAreas,
-                recommendations: match.recommendations
-            } : null;
-        }).filter(Boolean);
+        // Enrich with full career path data and validate
+        const enrichedMatches = analysisResult.matches
+            .map(match => {
+                const careerPath = careerPaths.find(path => path.$id === match.careerPathId);
+                if (!careerPath) return null;
+                
+                return {
+                    careerPath,
+                    matchScore: Math.min(Math.max(match.matchScore, 0), 100), // Ensure score is 0-100
+                    reasoning: match.reasoning || `Good fit based on your ${talent.careerStage} profile`,
+                    strengths: Array.isArray(match.strengths) ? match.strengths : ['Strong foundation for growth'],
+                    developmentAreas: Array.isArray(match.developmentAreas) ? match.developmentAreas : ['Industry knowledge', 'Specialized skills'],
+                    recommendations: Array.isArray(match.recommendations) ? match.recommendations : ['Take relevant courses', 'Build portfolio projects', 'Network with professionals']
+                };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.matchScore - a.matchScore); // Sort by score descending
 
         log(`AI generated ${enrichedMatches.length} matches`);
-        return enrichedMatches.slice(0, 5);
+        
+        // Return top 8 matches, but ensure we have at least 5
+        const finalMatches = enrichedMatches.slice(0, 8);
+        
+        if (finalMatches.length < 5) {
+            log(`Only ${finalMatches.length} AI matches, supplementing with fallback`);
+            const fallbackMatches = generateFastFallbackMatches(surveyResponses, careerPaths, talent.careerStage);
+            
+            // Add fallback matches that aren't already included
+            const existingIds = new Set(finalMatches.map(m => m.careerPath.$id));
+            const additionalMatches = fallbackMatches.filter(m => !existingIds.has(m.careerPath.$id));
+            
+            finalMatches.push(...additionalMatches.slice(0, 5 - finalMatches.length));
+        }
+
+        return finalMatches;
 
     } catch (err) {
-        log(`AI analysis failed (${err.message}), using fallback`);
-        return generateFastFallbackMatches(surveyResponses, careerPaths, talent.careerStage);
+        log(`AI analysis failed (${err.message}), using enhanced fallback`);
+        return generateEnhancedFallbackMatches(surveyResponses, careerPaths, talent);
     }
 }
 
 function preFilterCareerPaths(surveyResponses, careerPaths) {
-    // Quick filtering to reduce AI processing load
+    // Enhanced filtering to be more inclusive while still reducing load
     const interestedFields = surveyResponses.interestedFields || [];
     const currentSkills = surveyResponses.currentSkills || [];
+    const interests = surveyResponses.interests || [];
     
-    if (interestedFields.length === 0 && currentSkills.length === 0) {
-        return careerPaths.slice(0, 20); // Return first 20 if no filters
+    if (interestedFields.length === 0 && currentSkills.length === 0 && interests.length === 0) {
+        return careerPaths.slice(0, 30); // Return more paths if no specific criteria
     }
 
     const filtered = careerPaths.filter(path => {
-        // Field match
-        const fieldMatch = interestedFields.length === 0 || 
-            interestedFields.includes(path.industry);
+        let score = 0;
         
-        // Skill overlap
+        // Field match (high weight)
+        if (interestedFields.includes(path.industry)) score += 3;
+        
+        // Skill overlap (medium-high weight)
         const pathSkills = path.requiredSkills || [];
-        const skillOverlap = currentSkills.some(skill => 
+        const skillMatches = currentSkills.filter(skill => 
             pathSkills.some(pathSkill => 
                 pathSkill.toLowerCase().includes(skill.toLowerCase()) ||
                 skill.toLowerCase().includes(pathSkill.toLowerCase())
             )
-        );
+        ).length;
+        score += skillMatches;
         
-        return fieldMatch || skillOverlap;
+        // Interest alignment (medium weight)
+        const pathInterests = path.requiredInterests || [];
+        const interestMatches = interests.filter(interest =>
+            pathInterests.some(pathInterest =>
+                pathInterest.toLowerCase().includes(interest.toLowerCase()) ||
+                interest.toLowerCase().includes(pathInterest.toLowerCase())
+            )
+        ).length;
+        score += interestMatches * 0.5;
+        
+        // Include if any criteria match or if it's a broad match
+        return score > 0;
     });
 
-    return filtered.length > 0 ? filtered.slice(0, 25) : careerPaths.slice(0, 15);
+    // If we filtered too aggressively, include more paths
+    if (filtered.length < 15) {
+        const remaining = careerPaths.filter(path => !filtered.includes(path));
+        filtered.push(...remaining.slice(0, 15 - filtered.length));
+    }
+
+    return filtered.slice(0, 35); // Increased limit for more options
 }
 
-function createConcisePathSummary(paths) {
-    return paths.map(path => 
-        `${path.$id}:${path.title}(${path.industry})-Skills:${(path.requiredSkills || []).slice(0, 3).join(',')}`
-    ).join('\n');
+function createEnhancedPathSummary(paths) {
+    return paths.map(path => {
+        const skills = (path.requiredSkills || []).slice(0, 4).join(',');
+        const interests = (path.requiredInterests || []).slice(0, 3).join(',');
+        return `${path.$id}: "${path.title}" | Industry: ${path.industry} | Skills: ${skills} | Interests: ${interests} | Level: ${path.level || 'All'}`;
+    }).join('\n');
 }
 
 function buildOptimizedContextPrompt(talent, surveyResponses, currentCareerPath) {
     const age = calculateAge(talent.dateofBirth);
     
-    let prompt = `USER: ${talent.careerStage}, Age:${age}
-Education: ${surveyResponses.educationLevel || 'Unknown'}`;
+    let prompt = `CANDIDATE PROFILE:
+Career Stage: ${talent.careerStage}
+Age: ${age}
+Education: ${surveyResponses.educationLevel || 'Not specified'}`;
     
-    if (surveyResponses.degreeProgram) prompt += ` - ${surveyResponses.degreeProgram}`;
+    if (surveyResponses.degreeProgram) {
+        prompt += ` (${surveyResponses.degreeProgram})`;
+    }
     
     prompt += `
-Skills: ${(surveyResponses.currentSkills || []).join(', ')}
-Learning: ${(surveyResponses.skillsToLearn || []).join(', ')}
-Interests: ${(surveyResponses.interests || []).join(', ')}
-Fields: ${(surveyResponses.interestedFields || []).join(', ')}`;
 
+SKILLS & INTERESTS:
+Current Skills: ${(surveyResponses.currentSkills || ['None listed']).join(', ')}
+Eager to Learn: ${(surveyResponses.skillsToLearn || ['Open to learning']).join(', ')}
+Personal Interests: ${(surveyResponses.interests || ['Various']).join(', ')}
+Interested Fields: ${(surveyResponses.interestedFields || ['Exploring options']).join(', ')}`;
+
+    // Add work preferences
+    if (surveyResponses.workEnvironmentPreference) {
+        prompt += `
+Work Environment Preference: ${surveyResponses.workEnvironmentPreference}`;
+    }
+
+    // Add current experience context
     if (currentCareerPath) {
         prompt += `
-Current: ${currentCareerPath.title} (${surveyResponses.yearsExperience || '?'} yrs, ${surveyResponses.currentSeniorityLevel || '?'} level)`;
+
+CURRENT SITUATION:
+Current Path: ${currentCareerPath.title} in ${currentCareerPath.industry}
+Experience: ${surveyResponses.yearsExperience || 'Not specified'} years
+Level: ${surveyResponses.currentSeniorityLevel || 'Not specified'}`;
+        
+        if (surveyResponses.reasonForChange) {
+            prompt += `
+Reason for Change: ${surveyResponses.reasonForChange}`;
+        }
+    }
+
+    // Add career goals if available
+    if (surveyResponses.careerGoals) {
+        prompt += `
+Career Goals: ${surveyResponses.careerGoals}`;
     }
 
     return prompt;
 }
 
+function generateEnhancedFallbackMatches(surveyResponses, careerPaths, talent) {
+    const currentSkills = surveyResponses.currentSkills || [];
+    const interests = surveyResponses.interests || [];
+    const fields = surveyResponses.interestedFields || [];
+    const skillsToLearn = surveyResponses.skillsToLearn || [];
+    
+    const scoredPaths = careerPaths.map(path => {
+        let score = 0;
+        let reasoning = [];
+        
+        // Enhanced scoring algorithm
+        const skillMatches = (path.requiredSkills || [])
+            .filter(skill => currentSkills.some(userSkill => 
+                userSkill.toLowerCase().includes(skill.toLowerCase()) ||
+                skill.toLowerCase().includes(userSkill.toLowerCase())
+            )).length;
+        score += skillMatches * 25;
+        if (skillMatches > 0) reasoning.push(`${skillMatches} skill alignment${skillMatches > 1 ? 's' : ''}`);
+        
+        const learningMatches = (path.requiredSkills || [])
+            .filter(skill => skillsToLearn.some(learnSkill =>
+                learnSkill.toLowerCase().includes(skill.toLowerCase()) ||
+                skill.toLowerCase().includes(learnSkill.toLowerCase())
+            )).length;
+        score += learningMatches * 15;
+        if (learningMatches > 0) reasoning.push(`interested in learning ${learningMatches} relevant skill${learningMatches > 1 ? 's' : ''}`);
+        
+        const interestMatches = (path.requiredInterests || [])
+            .filter(interest => interests.some(userInterest =>
+                userInterest.toLowerCase().includes(interest.toLowerCase()) ||
+                interest.toLowerCase().includes(userInterest.toLowerCase())
+            )).length;
+        score += interestMatches * 20;
+        if (interestMatches > 0) reasoning.push(`${interestMatches} interest match${interestMatches > 1 ? 'es' : ''}`);
+        
+        if (fields.includes(path.industry)) {
+            score += 30;
+            reasoning.push(`strong interest in ${path.industry}`);
+        }
+        
+        // Career stage bonus
+        if (path.level && talent.careerStage) {
+            if ((talent.careerStage === 'Pathfinder' && path.level === 'Entry') ||
+                (talent.careerStage === 'Trailblazer' && ['Entry', 'Mid'].includes(path.level)) ||
+                (talent.careerStage === 'Horizon Changer' && ['Mid', 'Senior'].includes(path.level))) {
+                score += 10;
+                reasoning.push(`appropriate for ${talent.careerStage} level`);
+            }
+        }
+        
+        // Add some randomization for variety
+        score += Math.random() * 8;
+        
+        return {
+            careerPath: path,
+            matchScore: Math.min(Math.round(score), 95), // Cap at 95 for fallback
+            reasoning: reasoning.length > 0 ? reasoning.join(', ') : `Potential fit for your ${talent.careerStage} profile`,
+            strengths: currentSkills.slice(0, 2).map(s => `Experience with ${s}`) || ['Foundation for growth'],
+            developmentAreas: ['Industry-specific knowledge', 'Advanced skill development'],
+            recommendations: [
+                'Research the field thoroughly',
+                'Take introductory courses',
+                'Connect with professionals in the industry',
+                'Start building relevant projects'
+            ]
+        };
+    });
+    
+    return scoredPaths
+        .sort((a, b) => b.matchScore - a.matchScore)
+        .slice(0, 8);
+}
+
 function generateFastFallbackMatches(surveyResponses, careerPaths, careerStage) {
+    // Keep original fast fallback for emergency use
     const currentSkills = surveyResponses.currentSkills || [];
     const interests = surveyResponses.interests || [];
     const fields = surveyResponses.interestedFields || [];
@@ -262,7 +422,6 @@ function generateFastFallbackMatches(surveyResponses, careerPaths, careerStage) 
     const scoredPaths = careerPaths.map(path => {
         let score = 0;
         
-        // Quick scoring algorithm
         const skillMatches = (path.requiredSkills || [])
             .filter(skill => currentSkills.includes(skill)).length;
         score += skillMatches * 20;
@@ -273,7 +432,6 @@ function generateFastFallbackMatches(surveyResponses, careerPaths, careerStage) 
         
         if (fields.includes(path.industry)) score += 30;
         
-        // Random factor for variety
         score += Math.random() * 10;
         
         return {
@@ -288,7 +446,7 @@ function generateFastFallbackMatches(surveyResponses, careerPaths, careerStage) 
     
     return scoredPaths
         .sort((a, b) => b.matchScore - a.matchScore)
-        .slice(0, 3);
+        .slice(0, 6);
 }
 
 function filterValidAttributes(surveyResponses) {
