@@ -42,7 +42,10 @@ export default async function (context) {
             const sessionId = authHeader.substring(7);
             userClient.setSession(sessionId);
             
-            const { Account } = require('node-appwrite');
+            // This require statement should be at the top with other imports or handled differently in a serverless function
+            // const { Account } = require('node-appwrite'); 
+            // For now, moving it here to demonstrate the fix, but ideally manage imports consistently
+            const { Account } = await import('node-appwrite'); // Use dynamic import for ESM
             const userAccount = new Account(userClient);
             const user = await userAccount.get();
             userId = user.$id;
@@ -89,9 +92,12 @@ export default async function (context) {
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash",
-      generationConfig: {
-        thinkingBudget: 0,
-      }
+      // Corrected structure for thinkingBudget
+      config: { 
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
+      },
     });
 
     const databases = new Databases(client);
