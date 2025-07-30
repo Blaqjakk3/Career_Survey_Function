@@ -31,21 +31,16 @@ export default async function (context) {
         if (context.req.headers['x-appwrite-user-id']) {
           userId = context.req.headers['x-appwrite-user-id'];
         } else if (context.req.headers['authorization']) {
-          // If we have an auth header, we can get the user from the client
           const userClient = new Client()
             .setEndpoint(APPWRITE_ENDPOINT)
             .setProject(APPWRITE_PROJECT_ID);
           
-          // Set the session from the authorization header
           const authHeader = context.req.headers['authorization'];
           if (authHeader.startsWith('Bearer ')) {
             const sessionId = authHeader.substring(7);
             userClient.setSession(sessionId);
             
-            // This require statement should be at the top with other imports or handled differently in a serverless function
-            // const { Account } = require('node-appwrite'); 
-            // For now, moving it here to demonstrate the fix, but ideally manage imports consistently
-            const { Account } = await import('node-appwrite'); // Use dynamic import for ESM
+            const { Account } = await import('node-appwrite');
             const userAccount = new Account(userClient);
             const user = await userAccount.get();
             userId = user.$id;
@@ -56,7 +51,6 @@ export default async function (context) {
       }
     }
 
-    // Use context.log for better logging experience
     context.log('Environment variables loaded:', {
       hasEndpoint: !!APPWRITE_ENDPOINT,
       hasProjectId: !!APPWRITE_PROJECT_ID,
@@ -68,12 +62,7 @@ export default async function (context) {
 
     // Validate required environment variables
     if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID || !APPWRITE_API_KEY || !GEMINI_API_KEY) {
-      context.error("Missing required environment variables", {
-        APPWRITE_ENDPOINT: !!APPWRITE_ENDPOINT,
-        APPWRITE_PROJECT_ID: !!APPWRITE_PROJECT_ID,
-        APPWRITE_API_KEY: !!APPWRITE_API_KEY,
-        GEMINI_API_KEY: !!GEMINI_API_KEY
-      });
+      context.error("Missing required environment variables");
       throw new Error("Missing required environment variables");
     }
 
@@ -88,23 +77,23 @@ export default async function (context) {
       .setProject(APPWRITE_PROJECT_ID)
       .setKey(APPWRITE_API_KEY);
 
-    // Initialize Gemini AI
+    // Initialize Gemini AI with optimized configuration
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash",
-      // Corrected structure for thinkingBudget
-      config: { 
-        thinkingConfig: {
-          thinkingBudget: 0,
-        },
-      },
+      generationConfig: {
+        temperature: 0.6,
+        topP: 0.8,
+        topK: 20,
+        maxOutputTokens: 2048, // Limit output for faster response
+      }
     });
 
     const databases = new Databases(client);
 
     context.log('Fetching user data for userId:', userId);
 
-    // Get user data for career stage and basic info
+    // Get user data
     const user = await databases.listDocuments(
       DATABASE_ID,
       TALENTS_COLLECTION_ID,
@@ -123,19 +112,6 @@ export default async function (context) {
       careerStage,
       hasSurveyAnswers: !!surveyAnswers
     });
-
-    // Get all career paths
-    const careerPaths = await databases.listDocuments(
-      DATABASE_ID,
-      CAREER_PATHS_COLLECTION_ID
-    );
-
-    if (careerPaths.documents.length === 0) {
-      context.error("No career paths found in database");
-      throw new Error("No career paths found in database");
-    }
-
-    context.log('Career paths found:', careerPaths.documents.length);
 
     // Function to map survey answers to user profile data
     const mapSurveyAnswersToProfile = (answers, careerStage) => {
@@ -156,11 +132,11 @@ export default async function (context) {
         changeUrgency: ''
       };
 
-      // Map common fields across all career stages
+      // Map common fields
       if (answers.educationLevel) profile.education = answers.educationLevel;
       if (answers.program) profile.program = answers.program;
       
-      // Handle skills - convert single answers to arrays for consistency
+      // Handle arrays
       if (answers.currentSkills) {
         profile.currentSkills = Array.isArray(answers.currentSkills) 
           ? answers.currentSkills 
@@ -203,19 +179,14 @@ export default async function (context) {
       return profile;
     };
 
-    // Use survey answers if provided, otherwise fall back to stored user data
+    // Get user profile
     let userProfile;
     if (surveyAnswers && Object.keys(surveyAnswers).length > 0) {
       context.log('Using survey answers for recommendation');
       userProfile = mapSurveyAnswersToProfile(surveyAnswers, careerStage);
       
-      // Update the talents collection with the new survey data
+      // Update user data in background (don't wait for it)
       const updateData = {};
-      
-      // Map survey answers to database fields where appropriate
-      if (surveyAnswers.educationLevel && !['High School', 'Some College'].includes(surveyAnswers.educationLevel)) {
-        if (surveyAnswers.program && !updateData.degrees) updateData.degrees = [surveyAnswers.program];
-      }
       if (surveyAnswers.currentSkills) {
         updateData.skills = Array.isArray(surveyAnswers.currentSkills) 
           ? surveyAnswers.currentSkills 
@@ -226,27 +197,10 @@ export default async function (context) {
           ? surveyAnswers.mainInterests 
           : [surveyAnswers.mainInterests];
       }
-      if (surveyAnswers.interestedFields) {
-        updateData.interestedFields = Array.isArray(surveyAnswers.interestedFields) 
-          ? surveyAnswers.interestedFields 
-          : [surveyAnswers.interestedFields];
-      }
-      if (surveyAnswers.currentPath) updateData.currentPath = surveyAnswers.currentPath;
-      if (surveyAnswers.seniorityLevel) updateData.currentSeniorityLevel = surveyAnswers.seniorityLevel;
       
-      // Update the user document with relevant survey data
       if (Object.keys(updateData).length > 0) {
-        try {
-          await databases.updateDocument(
-            DATABASE_ID,
-            TALENTS_COLLECTION_ID,
-            userData.$id,
-            updateData
-          );
-          context.log('Updated user profile with survey data');
-        } catch (updateError) {
-          context.log('Error updating user profile:', updateError);
-        }
+        databases.updateDocument(DATABASE_ID, TALENTS_COLLECTION_ID, userData.$id, updateData)
+          .catch(err => context.log('Background update error:', err));
       }
     } else {
       context.log('Using stored user data for recommendation');
@@ -261,104 +215,157 @@ export default async function (context) {
       };
     }
 
-    // Prepare prompt based on career stage and user profile
-    let prompt = `Based on the following user profile, recommend the top 3 career paths from the provided list. `;
-    prompt += `User is a ${careerStage}.\n\n`;
+    // Smart filtering function to reduce career paths to manageable number
+    const filterRelevantCareerPaths = (allPaths, userProfile) => {
+      const userSkills = [...(userProfile.currentSkills || []), ...(userProfile.interestedSkills || [])];
+      const userInterests = userProfile.interests || [];
+      const userFields = userProfile.interestedFields || [];
+      
+      // Score each career path
+      const scoredPaths = allPaths.map(path => {
+        let score = 0;
+        
+        // Skills matching
+        const pathSkills = path.requiredSkills || [];
+        const skillMatches = pathSkills.filter(skill => 
+          userSkills.some(userSkill => 
+            userSkill.toLowerCase().includes(skill.toLowerCase()) ||
+            skill.toLowerCase().includes(userSkill.toLowerCase())
+          )
+        ).length;
+        score += skillMatches * 3;
+        
+        // Interest matching
+        const pathInterests = path.requiredInterests || [];
+        const interestMatches = pathInterests.filter(interest =>
+          userInterests.some(userInterest =>
+            userInterest.toLowerCase().includes(interest.toLowerCase()) ||
+            interest.toLowerCase().includes(userInterest.toLowerCase())
+          )
+        ).length;
+        score += interestMatches * 2;
+        
+        // Field matching
+        const industryMatch = userFields.some(field =>
+          path.industry?.toLowerCase().includes(field.toLowerCase()) ||
+          field.toLowerCase().includes(path.industry?.toLowerCase() || '') ||
+          path.title?.toLowerCase().includes(field.toLowerCase()) ||
+          path.description?.toLowerCase().includes(field.toLowerCase())
+        );
+        if (industryMatch) score += 2;
+        
+        // Education alignment
+        if (path.suggestedDegrees && userProfile.education && userProfile.education !== 'Not specified') {
+          const educationMatch = path.suggestedDegrees.some(degree =>
+            userProfile.education.toLowerCase().includes(degree.toLowerCase()) ||
+            userProfile.program?.toLowerCase().includes(degree.toLowerCase())
+          );
+          if (educationMatch) score += 1;
+        }
+        
+        return { ...path, matchScore: score };
+      });
+      
+      // Sort by score and take top candidates, but ensure diversity
+      const topScored = scoredPaths.sort((a, b) => b.matchScore - a.matchScore);
+      const selected = [];
+      const usedIndustries = new Set();
+      
+      // First pass: take top scorers with different industries
+      for (const path of topScored) {
+        if (selected.length >= 20) break; // Limit to 20 for AI processing
+        if (!usedIndustries.has(path.industry) || selected.length < 10) {
+          selected.push(path);
+          if (path.industry) usedIndustries.add(path.industry);
+        }
+      }
+      
+      // Second pass: fill remaining slots with any high-scoring paths
+      for (const path of topScored) {
+        if (selected.length >= 20) break;
+        if (!selected.some(p => p.$id === path.$id)) {
+          selected.push(path);
+        }
+      }
+      
+      return selected;
+    };
 
-    if (careerStage === "Pathfinder") {
-      prompt += `User details:
-      - Education: ${userProfile.education || 'Not specified'}
-      - Program: ${userProfile.program || 'Not specified'}
-      - Current Skills: ${userProfile.currentSkills.join(', ') || 'Not specified'}
-      - Interested Skills: ${userProfile.interestedSkills.join(', ') || 'Not specified'}
-      - Interests: ${userProfile.interests.join(', ') || 'Not specified'}
-      - Interested Fields: ${userProfile.interestedFields.join(', ') || 'Not specified'}
-      - Preferred Work Environment: ${userProfile.workEnvironment || 'Not specified'}
-      `;
-    } else if (careerStage === "Trailblazer") {
-      prompt += `User details:
-      - Current Path: ${userProfile.currentPath || 'Not specified'}
-      - Years of Experience: ${userProfile.yearsExperience || 'Not specified'}
-      - Seniority Level: ${userProfile.seniorityLevel || 'Not specified'}
-      - Education: ${userProfile.education || 'Not specified'}
-      - Program: ${userProfile.program || 'Not specified'}
-      - Current Skills: ${userProfile.currentSkills.join(', ') || 'Not specified'}
-      - Interested Skills: ${userProfile.interestedSkills.join(', ') || 'Not specified'}
-      - Interests: ${userProfile.interests.join(', ') || 'Not specified'}
-      - Interested Fields: ${userProfile.interestedFields.join(', ') || 'Not specified'}
-      - Career Goals: ${userProfile.careerGoals || 'Not specified'}
-      `;
-    } else if (careerStage === "Horizon Changer") {
-      prompt += `User details:
-      - Current Path: ${userProfile.currentPath || 'Not specified'}
-      - Years of Experience: ${userProfile.yearsExperience || 'Not specified'}
-      - Seniority Level: ${userProfile.seniorityLevel || 'Not specified'}
-      - Education: ${userProfile.education || 'Not specified'}
-      - Program: ${userProfile.program || 'Not specified'}
-      - Current Skills: ${userProfile.currentSkills.join(', ') || 'Not specified'}
-      - Interested Skills: ${userProfile.interestedSkills.join(', ') || 'Not specified'}
-      - Interests: ${userProfile.interests.join(', ') || 'Not specified'}
-      - Interested Fields: ${userProfile.interestedFields.join(', ') || 'Not specified'}
-      - Current Work Environment: ${userProfile.currentWorkEnvironment || 'Not specified'}
-      - Preferred Work Environment: ${userProfile.preferredWorkEnvironment || 'Not specified'}
-      - Reason for Change: ${userProfile.reasonForChange || 'Not specified'}
-      - Change Urgency: ${userProfile.changeUrgency || 'Not specified'}
-      `;
+    // Get filtered career paths (use smart batching)
+    context.log('Fetching career paths...');
+    const careerPathsBatch1 = await databases.listDocuments(
+      DATABASE_ID,
+      CAREER_PATHS_COLLECTION_ID,
+      [Query.limit(100)]
+    );
+    
+    let allCareerPaths = careerPathsBatch1.documents;
+    
+    // If we got 100, there might be more
+    if (careerPathsBatch1.documents.length === 100) {
+      const careerPathsBatch2 = await databases.listDocuments(
+        DATABASE_ID,
+        CAREER_PATHS_COLLECTION_ID,
+        [Query.limit(100), Query.offset(100)]
+      );
+      allCareerPaths = allCareerPaths.concat(careerPathsBatch2.documents);
     }
 
-    prompt += `\nAvailable Career Paths:\n`;
-    careerPaths.documents.forEach(path => {
-      prompt += `- ${path.title} (ID: ${path.$id}): ${path.description}\n`;
-      prompt += `  Required Skills: ${path.requiredSkills?.join(', ') || 'None'}\n`;
-      prompt += `  Required Interests: ${path.requiredInterests?.join(', ') || 'None'}\n`;
+    context.log('Total career paths found:', allCareerPaths.length);
+
+    // Filter to most relevant paths
+    const relevantPaths = filterRelevantCareerPaths(allCareerPaths, userProfile);
+    context.log('Filtered to relevant paths:', relevantPaths.length);
+
+    // Prepare concise prompt for faster processing
+    let prompt = `Based on the user profile, recommend the top 5 career paths from the provided list. User is a ${careerStage}.\n\n`;
+
+    // Add user profile based on career stage
+    if (careerStage === "Pathfinder") {
+      prompt += `User: Education: ${userProfile.education}, Skills: ${userProfile.currentSkills.join(', ')}, Interests: ${userProfile.interests.join(', ')}, Fields: ${userProfile.interestedFields.join(', ')}\n\n`;
+    } else if (careerStage === "Trailblazer") {
+      prompt += `User: Current Path: ${userProfile.currentPath}, Experience: ${userProfile.yearsExperience}, Skills: ${userProfile.currentSkills.join(', ')}, Interests: ${userProfile.interests.join(', ')}, Goals: ${userProfile.careerGoals}\n\n`;
+    } else if (careerStage === "Horizon Changer") {
+      prompt += `User: Current Path: ${userProfile.currentPath}, Experience: ${userProfile.yearsExperience}, Skills: ${userProfile.currentSkills.join(', ')}, Interests: ${userProfile.interests.join(', ')}, Reason for Change: ${userProfile.reasonForChange}\n\n`;
+    }
+
+    prompt += `Career Paths:\n`;
+    relevantPaths.forEach((path, index) => {
+      prompt += `${index + 1}. ${path.title} (ID: ${path.$id}) - ${path.industry || 'General'}\n`;
+      prompt += `   Skills: ${path.requiredSkills?.slice(0, 3).join(', ') || 'None'}\n`;
+      prompt += `   Interests: ${path.requiredInterests?.slice(0, 3).join(', ') || 'None'}\n\n`;
     });
 
-    prompt += `\nProvide your response in JSON format with this structure:
+    prompt += `Return JSON with exactly 5 recommendations:
     {
       "recommendations": [
         {
-          "pathId": "career_path_id_1",
-          "title": "Career Path Title 1",
-          "matchScore": 90,
-          "reason": "Detailed explanation why this is a good match",
-          "improvementAreas": ["skill1", "skill2"]
-        },
-        {
-          "pathId": "career_path_id_2",
-          "title": "Career Path Title 2",
-          "matchScore": 80,
-          "reason": "Detailed explanation why this is a good match",
-          "improvementAreas": ["skill1", "skill2"]
-        },
-        {
-          "pathId": "career_path_id_3",
-          "title": "Career Path Title 3",
-          "matchScore": 75,
-          "reason": "Detailed explanation why this is a good match",
+          "pathId": "id",
+          "title": "title",
+          "matchScore": 85,
+          "reason": "Brief reason for match",
           "improvementAreas": ["skill1", "skill2"]
         }
       ],
-      "generalAdvice": "Overall career advice based on the user's profile"
+      "generalAdvice": "Brief career advice"
     }`;
 
-    context.log('Calling Gemini AI...');
+    context.log('Calling Gemini AI with', relevantPaths.length, 'filtered career paths...');
 
     // Get AI response
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const text = response.text();
 
-    context.log('Gemini AI response received, length:', text.length);
+    context.log('AI response received, length:', text.length);
 
-    // Parse the JSON response
+    // Parse JSON response
     let jsonResponse;
     try {
-      // Clean the response text to remove any markdown formatting
       const cleanedText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       jsonResponse = JSON.parse(cleanedText);
     } catch (e) {
       context.error("Failed to parse AI response:", text);
-      // If JSON parsing fails, try to extract JSON from text
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
@@ -371,41 +378,41 @@ export default async function (context) {
       }
     }
 
-    // Validate the response structure
+    // Validate response
     if (!jsonResponse.recommendations || !Array.isArray(jsonResponse.recommendations)) {
-      context.error("Invalid response structure from AI:", jsonResponse);
       throw new Error("Invalid response structure from AI");
     }
 
-    // Ensure we have exactly 3 recommendations
-    if (jsonResponse.recommendations.length < 3) {
-      context.error("AI did not provide enough recommendations:", jsonResponse.recommendations.length);
-      throw new Error("AI did not provide enough recommendations");
+    if (jsonResponse.recommendations.length < 5) {
+      context.log("AI provided fewer than 5 recommendations:", jsonResponse.recommendations.length);
+    }
+
+    // Validate path IDs exist
+    const validRecommendations = jsonResponse.recommendations.filter(rec => 
+      relevantPaths.some(path => path.$id === rec.pathId)
+    );
+
+    if (validRecommendations.length === 0) {
+      throw new Error("No valid recommendations from AI");
     }
 
     context.log('Updating user testTaken status...');
 
-    // Update user's testTaken status
-    await databases.updateDocument(
-      DATABASE_ID,
-      TALENTS_COLLECTION_ID,
-      userData.$id,
-      {
-        testTaken: true
-      }
-    );
+    // Update user status (don't wait for this)
+    databases.updateDocument(DATABASE_ID, TALENTS_COLLECTION_ID, userData.$id, { testTaken: true })
+      .catch(err => context.log('Error updating testTaken:', err));
 
-    // Prepare the response data
+    // Prepare response
     const responseData = {
       success: true,
-      recommendations: jsonResponse.recommendations.slice(0, 3), // Ensure only top 3
+      recommendations: validRecommendations.slice(0, 5), // Ensure max 5
       generalAdvice: jsonResponse.generalAdvice || "Continue developing your skills and exploring opportunities in your areas of interest.",
-      careerStage
+      careerStage,
+      totalPathsAnalyzed: relevantPaths.length,
+      totalPathsInDatabase: allCareerPaths.length
     };
 
     context.log('Career match completed successfully');
-
-    // Return the response using the correct Appwrite Cloud Function format
     return context.res.json(responseData);
 
   } catch (error) {
@@ -416,7 +423,6 @@ export default async function (context) {
       error: error.message || "An unknown error occurred"
     };
     
-    // Return error response using the correct Appwrite Cloud Function format
     return context.res.json(errorResponse);
   }
 }
