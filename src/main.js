@@ -42,10 +42,7 @@ export default async function (context) {
             const sessionId = authHeader.substring(7);
             userClient.setSession(sessionId);
             
-            // This require statement should be at the top with other imports or handled differently in a serverless function
-            // const { Account } = require('node-appwrite'); 
-            // For now, moving it here to demonstrate the fix, but ideally manage imports consistently
-            const { Account } = await import('node-appwrite'); // Use dynamic import for ESM
+            const { Account } = await import('node-appwrite');
             const userAccount = new Account(userClient);
             const user = await userAccount.get();
             userId = user.$id;
@@ -92,7 +89,6 @@ export default async function (context) {
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash",
-      // Corrected structure for thinkingBudget
       config: { 
         thinkingConfig: {
           thinkingBudget: 0,
@@ -121,10 +117,11 @@ export default async function (context) {
 
     context.log('User data found:', {
       careerStage,
+      currentPath: userData.currentPath,
       hasSurveyAnswers: !!surveyAnswers
     });
 
-    // Get ALL career paths with pagination to ensure we get all 111 paths
+    // Get ALL career paths with pagination to ensure we get all paths
     let allCareerPaths = [];
     let offset = 0;
     const limit = 100; // Appwrite's default limit
@@ -153,7 +150,7 @@ export default async function (context) {
     context.log('Total career paths found:', allCareerPaths.length);
 
     // Function to map survey answers to user profile data
-    const mapSurveyAnswersToProfile = (answers, careerStage) => {
+    const mapSurveyAnswersToProfile = (answers, careerStage, storedCurrentPath = null) => {
       const profile = {
         careerStage,
         education: '',
@@ -163,12 +160,14 @@ export default async function (context) {
         interests: [],
         interestedFields: [],
         workEnvironment: '',
-        currentPath: '',
+        currentPath: storedCurrentPath || '', // Use stored path as fallback
         yearsExperience: '',
         seniorityLevel: '',
         careerGoals: '',
         reasonForChange: '',
-        changeUrgency: ''
+        changeUrgency: '',
+        currentWorkEnvironment: '',
+        preferredWorkEnvironment: ''
       };
 
       // Map common fields across all career stages
@@ -222,7 +221,7 @@ export default async function (context) {
     let userProfile;
     if (surveyAnswers && Object.keys(surveyAnswers).length > 0) {
       context.log('Using survey answers for recommendation');
-      userProfile = mapSurveyAnswersToProfile(surveyAnswers, careerStage);
+      userProfile = mapSurveyAnswersToProfile(surveyAnswers, careerStage, userData.currentPath);
       
       // Update the talents collection with the new survey data
       const updateData = {};
@@ -276,15 +275,33 @@ export default async function (context) {
       };
     }
 
-    // Smart filtering function to reduce career paths before sending to AI
+    // Enhanced filtering function for different career stages
     const filterRelevantCareerPaths = (careerPaths, userProfile) => {
       const relevantPaths = [];
       const userInterests = userProfile.interests.map(i => i.toLowerCase());
       const userFields = userProfile.interestedFields.map(f => f.toLowerCase());
       const userSkills = userProfile.currentSkills.concat(userProfile.interestedSkills || []).map(s => s.toLowerCase());
       
+      // Special handling for Trailblazer - prioritize current path
+      let currentPathMatch = null;
+      if (careerStage === 'Trailblazer' && userProfile.currentPath && userProfile.currentPath !== 'Not specified') {
+        currentPathMatch = careerPaths.find(path => 
+          path.title.toLowerCase().includes(userProfile.currentPath.toLowerCase()) ||
+          userProfile.currentPath.toLowerCase().includes(path.title.toLowerCase())
+        );
+        if (currentPathMatch) {
+          context.log('Found current path match for Trailblazer:', currentPathMatch.title);
+        }
+      }
+      
       for (const path of careerPaths) {
         let relevanceScore = 0;
+        
+        // Special boost for Trailblazer's current path
+        if (careerStage === 'Trailblazer' && currentPathMatch && path.$id === currentPathMatch.$id) {
+          relevanceScore += 50; // High boost to ensure it's at the top
+          context.log('Boosting current path for Trailblazer:', path.title);
+        }
         
         // Check interests match
         if (path.requiredInterests && Array.isArray(path.requiredInterests)) {
@@ -321,6 +338,15 @@ export default async function (context) {
           if (degreeMatches) relevanceScore += 3;
         }
         
+        // For Horizon Changer, slightly boost paths that are different from current path
+        if (careerStage === 'Horizon Changer' && userProfile.currentPath && userProfile.currentPath !== 'Not specified') {
+          const isDifferentPath = !path.title.toLowerCase().includes(userProfile.currentPath.toLowerCase()) &&
+                                !userProfile.currentPath.toLowerCase().includes(path.title.toLowerCase());
+          if (isDifferentPath && relevanceScore > 0) {
+            relevanceScore += 2; // Small boost for different paths
+          }
+        }
+        
         // Include paths with any relevance score > 0, or if we don't have enough matches, include some random ones
         if (relevanceScore > 0) {
           relevantPaths.push({ ...path, relevanceScore });
@@ -342,17 +368,24 @@ export default async function (context) {
         relevantPaths.push(...randomPaths);
       }
       
-      // Return top 20 paths for AI to consider
-      return relevantPaths.slice(0, 20);
+      // Return top 25 paths for AI to consider (increased for better variety)
+      return relevantPaths.slice(0, 25);
     };
 
     context.log('Filtering relevant career paths...');
     const filteredCareerPaths = filterRelevantCareerPaths(allCareerPaths, userProfile);
     context.log('Filtered career paths:', filteredCareerPaths.length);
 
-    // Prepare prompt based on career stage and user profile
+    // Enhanced prompt based on career stage and user profile
     let prompt = `Based on the following user profile, recommend the top 5 career paths from the provided list. `;
-    prompt += `User is a ${careerStage}. Focus on providing diverse recommendations that match different aspects of the user's profile.\n\n`;
+    
+    if (careerStage === "Pathfinder") {
+      prompt += `User is a Pathfinder (someone exploring career options). Focus on providing diverse entry-level opportunities that match their interests and potential.\n\n`;
+    } else if (careerStage === "Trailblazer") {
+      prompt += `User is a Trailblazer (someone advancing in their current field). IMPORTANT: Their current path should be the #1 recommendation with the highest match score (95-100%) as they want to advance in their existing career. The other 4 recommendations should be related or complementary paths.\n\n`;
+    } else if (careerStage === "Horizon Changer") {
+      prompt += `User is a Horizon Changer (someone looking to change careers). Focus on diverse alternatives that leverage their existing skills while offering new challenges. Their current path can be included but should not dominate the recommendations.\n\n`;
+    }
 
     if (careerStage === "Pathfinder") {
       prompt += `User details:
@@ -403,12 +436,35 @@ export default async function (context) {
       prompt += `  Required Skills: ${path.requiredSkills?.join(', ') || 'None specified'}\n`;
       prompt += `  Required Interests: ${path.requiredInterests?.join(', ') || 'None specified'}\n`;
       prompt += `  Suggested Degrees: ${path.suggestedDegrees?.join(', ') || 'None specified'}\n`;
-      prompt += `  Salary Range: ${path.minSalary && path.maxSalary ? `$${path.minSalary} - $${path.maxSalary}` : 'Not specified'}\n\n`;
+      prompt += `  Salary Range: ${path.minSalary && path.maxSalary ? `$${path.minSalary} - $${path.maxSalary}` : 'Not specified'}\n`;
+      if (path.relevanceScore) prompt += `  Relevance Score: ${path.relevanceScore}\n`;
+      prompt += `\n`;
     });
 
-    prompt += `\nIMPORTANT: Select 5 DIFFERENT career paths that provide variety and match different aspects of the user's profile. Avoid recommending similar paths like "Data Scientist", "Machine Learning Engineer", and "Data Analyst" together. Instead, diversify across different industries and skill sets.
+    // Stage-specific instructions
+    if (careerStage === "Trailblazer") {
+      prompt += `\nCRITICAL INSTRUCTIONS FOR TRAILBLAZER:
+      1. The user's current path "${userProfile.currentPath}" should be the #1 recommendation with match score 95-100%
+      2. Find the career path that most closely matches their current path and make it the top recommendation
+      3. The remaining 4 recommendations should be advancement opportunities or specializations within their field
+      4. Focus on career growth and skill development in their existing domain
+      `;
+    } else if (careerStage === "Horizon Changer") {
+      prompt += `\nINSTRUCTIONS FOR HORIZON CHANGER:
+      1. Prioritize paths that leverage their existing skills but offer new challenges
+      2. Consider their reason for change: ${userProfile.reasonForChange}
+      3. Focus on transferable skills from their current path: ${userProfile.currentPath}
+      4. Provide diverse options across different industries/roles
+      `;
+    } else {
+      prompt += `\nINSTRUCTIONS FOR PATHFINDER:
+      1. Focus on entry-level opportunities that match their interests and education
+      2. Provide diverse options across different industries and skill requirements
+      3. Consider their preferred work environment and interests
+      `;
+    }
 
-    Provide your response in JSON format with this structure:
+    prompt += `\nProvide your response in JSON format with this structure:
     {
       "recommendations": [
         {
@@ -418,36 +474,9 @@ export default async function (context) {
           "reason": "Detailed explanation why this is a good match based on specific user interests/skills/background",
           "improvementAreas": ["skill1", "skill2"]
         },
-        {
-          "pathId": "career_path_id_2",
-          "title": "Career Path Title 2",
-          "matchScore": 85,
-          "reason": "Detailed explanation why this is a good match based on specific user interests/skills/background",
-          "improvementAreas": ["skill1", "skill2"]
-        },
-        {
-          "pathId": "career_path_id_3",
-          "title": "Career Path Title 3",
-          "matchScore": 80,
-          "reason": "Detailed explanation why this is a good match based on specific user interests/skills/background",
-          "improvementAreas": ["skill1", "skill2"]
-        },
-        {
-          "pathId": "career_path_id_4",
-          "title": "Career Path Title 4",
-          "matchScore": 75,
-          "reason": "Detailed explanation why this is a good match based on specific user interests/skills/background",
-          "improvementAreas": ["skill1", "skill2"]
-        },
-        {
-          "pathId": "career_path_id_5",
-          "title": "Career Path Title 5",
-          "matchScore": 70,
-          "reason": "Detailed explanation why this is a good match based on specific user interests/skills/background",
-          "improvementAreas": ["skill1", "skill2"]
-        }
+        // ... 4 more recommendations
       ],
-      "generalAdvice": "Overall career advice based on the user's profile and selected recommendations"
+      "generalAdvice": "Career stage-specific advice based on the user's profile and selected recommendations"
     }`;
 
     context.log('Calling Gemini AI...');
@@ -508,13 +537,14 @@ export default async function (context) {
     const responseData = {
       success: true,
       recommendations: jsonResponse.recommendations.slice(0, 5), // Ensure only top 5
-      generalAdvice: jsonResponse.generalAdvice || "Continue developing your skills and exploring opportunities in your areas of interest.",
+      generalAdvice: jsonResponse.generalAdvice || `Continue developing your skills and exploring opportunities in your areas of interest as a ${careerStage}.`,
       careerStage,
       totalPathsConsidered: allCareerPaths.length,
-      filteredPathsConsidered: filteredCareerPaths.length
+      filteredPathsConsidered: filteredCareerPaths.length,
+      userCurrentPath: userProfile.currentPath
     };
 
-    context.log('Career match completed successfully - Total paths:', allCareerPaths.length, 'Filtered paths:', filteredCareerPaths.length);
+    context.log('Career match completed successfully - Total paths:', allCareerPaths.length, 'Filtered paths:', filteredCareerPaths.length, 'Career stage:', careerStage);
 
     // Return the response using the correct Appwrite Cloud Function format
     return context.res.json(responseData);
