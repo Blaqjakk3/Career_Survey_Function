@@ -471,12 +471,12 @@ export default async function (context) {
           "pathId": "career_path_id_1",
           "title": "Career Path Title 1",
           "matchScore": 90,
-          "reason": "Detailed explanation why this is a good match based on specific user interests/skills/background",
+          "reason": "Explain why this path matches using personal pronouns like 'you' and 'your'. For example: 'This role aligns well with your interest in X and your strong background in Y. Your experience with Z makes you particularly well-suited for this path.'",
           "improvementAreas": ["skill1", "skill2"]
         },
         // ... 4 more recommendations
       ],
-      "generalAdvice": "Career stage-specific advice based on the user's profile and selected recommendations"
+      "generalAdvice": "Career stage-specific advice addressing the user directly using 'you' and 'your'"
     }`;
 
     context.log('Calling Gemini AI...');
