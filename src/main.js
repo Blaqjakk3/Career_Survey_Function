@@ -476,7 +476,7 @@ export default async function (context) {
         },
         // ... 4 more recommendations
       ],
-      "generalAdvice": "Career stage-specific advice addressing the user directly using 'you' and 'your'"
+      "generalAdvice": "Career stage-specific advice addressing the user directly using 'you' and 'your'. This advice must be a bit into depth using some answers from their survey but not too long. Max 3 lines."
     }`;
 
     context.log('Calling Gemini AI...');
