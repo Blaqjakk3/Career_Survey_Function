@@ -1,3 +1,19 @@
+/*
+  Career Survey Recommendation Function
+
+  This serverless function receives a user's survey answers (or uses their stored profile), 
+  fetches all available career paths, filters and scores them for relevance, and then calls 
+  the Gemini AI model to generate 5 personalized career recommendations. It updates the user's 
+  profile in the database and returns the recommendations and advice as JSON.
+
+  Key steps:
+  1. Authenticate user and parse survey answers.
+  2. Fetch user profile and all career paths from Appwrite database.
+  3. Normalize user data and filter career paths for relevance.
+  4. Compose a prompt and call Gemini AI for recommendations.
+  5. Parse and validate AI response, update user status, and return results.
+*/
+
 import { Client, Databases, Query } from 'node-appwrite';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
